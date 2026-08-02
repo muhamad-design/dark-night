@@ -205,15 +205,23 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   }
 });
 
-// The filter matters: without it every favicon, title and audible change wakes
-// the service worker just to be discarded by the guard below.
-chrome.tabs.onUpdated.addListener(
-  async (tabId, info, tab) => {
-    if (!info.url && info.status !== "complete") return;
-    await paintBadge(tab, await readState());
-  },
-  { properties: ["status", "url"] }
-);
+// No filter argument. `properties` is a Firefox extension to this event; Chrome
+// supports no filters here and throws "This event does not support filters"
+// straight out of addListener. At top level that took the entire worker down -
+// registration failed with status 15, and every line below it, both runtime
+// listeners and the reconcile() call, never ran at all. The badge went stale on
+// navigation, the pre-paint stylesheet was never registered and open tabs were
+// never adopted, while the declarative content script kept theming pages, so
+// the extension looked like it was working.
+//
+// The guard therefore lives in the callback: every favicon, title and audible
+// change wakes the worker and is discarded on the next line. That is the cost
+// of the event being unfiltered on this browser, and it is a great deal cheaper
+// than the worker not running.
+chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
+  if (!info.url && info.status !== "complete") return;
+  await paintBadge(tab, await readState());
+});
 
 chrome.runtime.onInstalled.addListener(reconcile);
 chrome.runtime.onStartup.addListener(reconcile);

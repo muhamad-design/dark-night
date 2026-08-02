@@ -112,7 +112,16 @@ function makeWorld({ sync = {}, session = {}, tabs = [], injectFails = false, qu
       },
       get: async (id) => w.tabs.find((t) => t.id === id),
       onActivated: { addListener: (fn) => w.listeners.activated.push(fn) },
-      onUpdated: { addListener: (fn, filter) => { w.updateFilter = filter; w.listeners.updated.push(fn); } }
+      // Chrome supports no filters on this event and throws from addListener
+      // when one is passed, which at top level kills the whole worker. The mock
+      // used to accept and record a filter, so the suite passed green while the
+      // real worker failed to register - reproduce the throw instead.
+      onUpdated: {
+        addListener: (fn, filter) => {
+          if (filter !== undefined) throw new TypeError("This event does not support filters");
+          w.listeners.updated.push(fn);
+        }
+      }
     },
     action: {
       setBadgeText: async (o) => { w.badges.push(o); },
@@ -275,9 +284,15 @@ async function run() {
   // --- tab events -----------------------------------------------------------
   await boot(makeWorld({ tabs: TABS, sync: { disabledSites: ["docs.google.com"] } }));
   await waitFor(() => early());
-  check("badge: onUpdated is filtered to status and url",
-    W.updateFilter && JSON.stringify(W.updateFilter.properties.sort()) === '["status","url"]',
-    JSON.stringify(W.updateFilter));
+  // The regression this replaces: a filter was passed to tabs.onUpdated, Chrome
+  // threw, and the worker died mid-file. Everything declared after that line
+  // silently vanished, so assert the tail of the file registered - that is what
+  // production actually lost, and it is invisible from the badge alone.
+  check("worker: registration survives to the end of the file",
+    W.listeners.updated.length === 1 &&
+    W.listeners.installed.length === 1 &&
+    W.listeners.startup.length === 1,
+    `updated=${W.listeners.updated.length} installed=${W.listeners.installed.length} startup=${W.listeners.startup.length}`);
   W.listeners.activated.forEach((fn) => fn({ tabId: 2 }));
   await waitFor(() => badgeFor(2) === "site");
   check("badge: switching to an excluded tab marks it", badgeFor(2) === "site", badgeFor(2));
