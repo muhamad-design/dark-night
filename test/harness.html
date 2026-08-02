@@ -191,9 +191,10 @@ async function loadContentScript() {
   new Function(src.replace(marker,
     `  window.__mm = {
        buildCss, buildDynamicCss, buildFilterCss, cssFilterValue,
-       siteDisabled, HOST, DEFAULTS, READY_ATTR,
+       siteDisabled, HOST, DEFAULTS, READY_ATTR, SP,
        get settings() { return settings; },
-       get observer() { return observer; }
+       get observer() { return observer; },
+       get deadCheck() { return deadCheck; }
      };
    })();`
   ))();
@@ -275,8 +276,20 @@ async function mainSuite() {
   check("specificity: id + !important is still themed",
     getComputedStyle($id("siteIdImportant")).backgroundColor === DARK,
     getComputedStyle($id("siteIdImportant")).backgroundColor);
+  // The booster is only safe if its argument matches nothing: an argument that
+  // did match would silently drop those elements out of the theme. Asserted by
+  // behaviour rather than by spelling - the booster's exact form is a
+  // performance decision and has changed once already - and probed with an
+  // element that actually carries one of the ids it names.
+  const boosterProbe = document.createElement("div");
+  boosterProbe.id = "\t";
+  $id("sample").appendChild(boosterProbe);
+  const boosterExcludesNothing =
+    boosterProbe.matches(window.__mm.SP) &&
+    document.querySelectorAll("*" + window.__mm.SP).length === document.querySelectorAll("*").length;
+  boosterProbe.remove();
   check("specificity: booster can never match a real element",
-    css().includes(":not(#\\9)"));
+    boosterExcludesNothing && css().includes(window.__mm.SP), window.__mm.SP);
   check("specificity: images still win over the universal rule",
     getComputedStyle($id("img1")).backgroundColor === "rgba(0, 0, 0, 0)",
     getComputedStyle($id("img1")).backgroundColor);
@@ -456,6 +469,10 @@ async function mainSuite() {
   check("disable: html filter cleared", htmlFilter() === "none", htmlFilter());
   check("disable: page back to light", bodyBg() !== DARK, bodyBg());
   check("disable: observer disconnected", window.__mm.observer === null);
+  // The liveness poll exists only to reclaim what this frame injected. With
+  // nothing injected there is nothing to reclaim, so it must not keep ticking -
+  // it ran in every frame of every page, themed or not, before it was gated.
+  check("disable: liveness poll stopped", window.__mm.deadCheck === null);
 
   // mutating the DOM while disabled must not resurrect the theme
   document.head.appendChild(document.createElement("meta"));
@@ -470,6 +487,7 @@ async function mainSuite() {
   check("re-enable: style restored", !!styleEl());
   check("re-enable: body dark again", bodyBg() === DARK, bodyBg());
   check("re-enable: observer restarted", window.__mm.observer !== null);
+  check("re-enable: liveness poll restarted", window.__mm.deadCheck !== null);
   check("re-enable: shadow roots re-adopted",
     getComputedStyle(sh.getElementById("sInner")).backgroundColor === DARK,
     getComputedStyle(sh.getElementById("sInner")).backgroundColor);
@@ -497,6 +515,9 @@ async function mainSuite() {
   await set({ disabledSites: [host] });
   await tick();
   check(`per-site: disabling "${host}" removes theme`, !styleEl());
+  // The common case by volume: an excluded site is still injected into, in every
+  // frame, and used to poll forever for an invalidation it has nothing to undo.
+  check("per-site: excluded site does not poll", window.__mm.deadCheck === null);
 
   // regression: popup stored "www.x" but content matched only exact/subdomain
   await set({ disabledSites: ["www." + host] });

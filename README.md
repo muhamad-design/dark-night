@@ -151,8 +151,9 @@ python3 -m http.server 8765
 
 | URL | Covers |
 | --- | --- |
-| `localhost:8765/test/harness.html` | 99 assertions: both engines, specificity, shadow DOM (including a real custom-element upgrade), frames, top layer, sliders, toggles, per-site rules, self-heal, host matching |
+| `localhost:8765/test/harness.html` | 102 assertions: both engines, specificity, shadow DOM (including a real custom-element upgrade), frames, top layer, sliders, toggles, per-site rules, liveness-poll gating, self-heal, host matching |
 | `localhost:8765/test/harness.html?suite=pending` | A settings write landing between the initial storage read and its callback |
+| `localhost:8765/test/perf-bench.html` | Style-resolution cost of the real dynamic sheet on a ~9,500-element DOM, and a guard on the specificity booster: it must stay cascade-identical to the chained form and beat it head-to-head |
 | `localhost:8765/test/popup-harness.html` | 65 assertions: the **built** React popup against a mocked `chrome`, including beUI component wiring, rejected writes, external changes and corrupt settings |
 | `localhost:8765/test/worker-harness.html` | 38 assertions: the real `background.js` driven as a black box against a mocked MV3 surface - registration lifecycle, per-tab badge, tab adoption, the shortcut, host matching, corrupt storage |
 | `localhost:8765/test/test.html?mode=dynamic\|filter\|off` | Visual page with the layout patterns that commonly break dark-mode extensions |

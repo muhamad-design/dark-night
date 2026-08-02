@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Dark Night perf bench</title>
+  <style>
+    body { font: 13px/1.5 ui-monospace, Menlo, monospace; margin: 20px; background: #fdfdfb; color: #222; }
+    #out { white-space: pre; }
+    .pass { color: #1a7f37; }
+    .fail { color: #c00; font-weight: bold; }
+    h2 { font-size: 13px; margin: 16px 0 4px; }
+    /* The measured DOM lives here. Kept visible - an offscreen or display:none
+       subtree skips the style and layout work this bench exists to measure. */
+    #mount { border: 1px solid #ccc; height: 240px; overflow: auto; margin-top: 12px; }
+    #mount .card { background: #fff; border: 1px solid #ddd; padding: 6px; margin: 2px; }
+    #mount .row { display: flex; gap: 4px; }
+    #mount nav li { list-style: none; padding: 2px 6px; }
+    #mount nav li:hover { background: #eee; }
+    #mount table { border-collapse: collapse; }
+    #mount td { border: 1px solid #ccc; padding: 2px 6px; }
+  </style>
+</head>
+<body>
+  <h1>Dark Night perf bench</h1>
+  <div id="out">running...</div>
+  <div id="mount"></div>
+
+<script>
+// ---------------------------------------------------------------------------
+// chrome API mock. Must exist before content.js loads. `enabled: false` keeps
+// content.js from theming this page: applyTheme() takes the inactive branch, so
+// no stylesheet, no observers and no interval are left running to perturb the
+// timings below. Only the pure CSS builders are used.
+// ---------------------------------------------------------------------------
+window.chrome = {
+  runtime: { id: "dark-night-perf", lastError: null },
+  storage: {
+    sync: { get(defaults, cb) { setTimeout(() => cb({ ...defaults, enabled: false }), 0); } },
+    onChanged: { addListener() {} }
+  }
+};
+
+const results = [];
+function check(name, cond, detail) {
+  results.push({ name, ok: !!cond, detail });
+}
+
+// ---------------------------------------------------------------------------
+// Load the REAL content.js and expose what the bench needs. The production file
+// is never modified - the transform happens here at test time, same as
+// harness.html.
+// ---------------------------------------------------------------------------
+async function loadContentScript() {
+  const src = await (await fetch("../content.js?t=" + performance.now(), { cache: "no-store" })).text();
+  const marker = /\}\)\(\);\s*$/;
+  if (!marker.test(src)) throw new Error("content.js does not end in the expected IIFE form");
+  new Function(src.replace(marker,
+    `  window.__perf = { buildDynamicCss, buildFilterCss, DEFAULTS, SP };
+     })();`
+  ))();
+}
+
+// ---------------------------------------------------------------------------
+// A DOM shaped like a real app: nested nav lists (so the :has(li:hover) rule
+// has something to match), a table, cards, links and an image.
+// ---------------------------------------------------------------------------
+function buildDom(sections) {
+  const frag = document.createDocumentFragment();
+  for (let s = 0; s < sections; s++) {
+    const section = document.createElement("section");
+    section.className = "card";
+
+    const nav = document.createElement("nav");
+    const ul = document.createElement("ul");
+    for (let i = 0; i < 6; i++) {
+      const li = document.createElement("li");
+      li.setAttribute("role", "menuitem");
+      const a = document.createElement("a");
+      a.href = "#";
+      const span = document.createElement("span");
+      span.textContent = "item " + i;
+      a.appendChild(span);
+      li.appendChild(a);
+      const sub = document.createElement("ul");
+      for (let j = 0; j < 3; j++) {
+        const sli = document.createElement("li");
+        const sa = document.createElement("a");
+        sa.href = "#";
+        sa.textContent = "sub " + j;
+        sli.appendChild(sa);
+        sub.appendChild(sli);
+      }
+      li.appendChild(sub);
+      ul.appendChild(li);
+    }
+    nav.appendChild(ul);
+    section.appendChild(nav);
+
+    const table = document.createElement("table");
+    const tbody = document.createElement("tbody");
+    for (let r = 0; r < 4; r++) {
+      const tr = document.createElement("tr");
+      for (let c = 0; c < 4; c++) {
+        const td = document.createElement("td");
+        td.textContent = r + "," + c;
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    section.appendChild(table);
+
+    const row = document.createElement("div");
+    row.className = "row";
+    for (let k = 0; k < 4; k++) {
+      const d = document.createElement("div");
+      d.className = "card";
+      d.setAttribute("role", "button");
+      const b = document.createElement("strong");
+      b.textContent = "cell";
+      d.appendChild(b);
+      row.appendChild(d);
+    }
+    section.appendChild(row);
+
+    const img = document.createElement("img");
+    img.width = 16; img.height = 16; img.alt = "";
+    img.src = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+    section.appendChild(img);
+
+    frag.appendChild(section);
+  }
+  return frag;
+}
+
+const mount = document.getElementById("mount");
+let sheet = null;
+function setSheet(css) {
+  if (sheet) sheet.remove();
+  sheet = null;
+  if (css === null) return;
+  sheet = document.createElement("style");
+  sheet.textContent = css;
+  document.head.appendChild(sheet);
+}
+
+// One sample: resolve style + layout for a fresh DOM insertion. The DOM is
+// built detached, off the clock, so only style resolution and layout are timed.
+function sample(css, sections) {
+  mount.textContent = "";
+  setSheet(null);
+  const frag = buildDom(sections);
+  setSheet(css);
+  document.body.offsetHeight;          // settle the sheet swap
+  const t0 = performance.now();
+  mount.appendChild(frag);
+  document.body.offsetHeight;          // force style resolution + layout
+  return performance.now() - t0;
+}
+
+// Variants are interleaved within each round, so machine drift lands on all of
+// them equally. A sequential A-then-B run on a busy machine reverses the result
+// - that is not hypothetical, it happened while this bench was being written.
+function race(variants, rounds, sections) {
+  const keys = Object.keys(variants);
+  const acc = {};
+  keys.forEach((k) => (acc[k] = []));
+  for (let r = 0; r < rounds; r++) {
+    for (const k of keys) acc[k].push(sample(variants[k], sections));
+  }
+  return acc;
+}
+
+const q = (a, p) => { const s = a.slice().sort((x, y) => x - y); return s[Math.floor(s.length * p)]; };
+
+// ---------------------------------------------------------------------------
+async function run() {
+  await loadContentScript();
+  await new Promise((r) => setTimeout(r, 20));   // let the stubbed read resolve
+  const { buildDynamicCss, DEFAULTS, SP } = window.__perf;
+
+  const CHAINED = ":not(#\\9):not(#\\9):not(#\\9)";
+  const current = buildDynamicCss({ ...DEFAULTS, enabled: true, mode: "dynamic" });
+  const chained = current.split(SP).join(CHAINED);
+
+  // --- correctness: the specificity hack must still outrank a site !important
+  const probe = document.createElement("div");
+  probe.className = "sitecard";
+  mount.appendChild(probe);
+  const site = document.createElement("style");
+  site.textContent = ".sitecard { background-color: rgb(255, 255, 255) !important; }";
+  document.head.appendChild(site);
+  check("site !important wins with no extension sheet",
+    getComputedStyle(probe).backgroundColor === "rgb(255, 255, 255)");
+
+  setSheet(current);
+  const withCurrent = getComputedStyle(probe).backgroundColor;
+  setSheet(chained);
+  const withChained = getComputedStyle(probe).backgroundColor;
+  setSheet(null);
+  site.remove();
+  probe.remove();
+
+  check("current SP outranks a site !important rule", withCurrent === "rgb(21, 21, 21)", withCurrent);
+  check("current SP and the chained form are cascade-identical",
+    withCurrent === withChained, withCurrent + " vs " + withChained);
+  check("SP is the single-compound form", SP === ":not(#\\9#\\8#\\7)", SP);
+
+  // --- perf
+  const SECTIONS = 100;
+  mount.textContent = "";
+  mount.appendChild(buildDom(SECTIONS));
+  const els = mount.querySelectorAll("*").length;
+  mount.textContent = "";
+
+  const ROUNDS = 40;
+  const acc = race({ baseline: null, current, chained }, ROUNDS, SECTIONS);
+  setSheet(null);
+  mount.textContent = "";
+
+  let currentWins = 0;
+  for (let i = 0; i < ROUNDS; i++) if (acc.current[i] < acc.chained[i]) currentWins++;
+
+  const base = q(acc.baseline, 0.25);
+  const ovCurrent = q(acc.current, 0.25) - base;
+  const ovChained = q(acc.chained, 0.25) - base;
+
+  // p25, not the median: on a machine with a browser and a chat app running,
+  // the fastest quartile is the least contaminated by unrelated load.
+  check("themed page still resolves within 3x an unthemed one",
+    q(acc.current, 0.25) < base * 3, `${q(acc.current, 0.25).toFixed(1)}ms vs ${base.toFixed(1)}ms`);
+  // Directional, not precise. Observed 37/40 on an idle machine and 28/40 with
+  // a browser and a chat app competing for the CPU, so the bar sits low enough
+  // to survive load. A straight revert of SP is caught by the exact-form check
+  // above, not by this one - equal variants would sit at ~50% and pass.
+  check("single-compound SP beats the chained form head-to-head",
+    currentWins > ROUNDS * 0.55, `${currentWins}/${ROUNDS} rounds`);
+
+  const lines = [];
+  lines.push(`DOM: ${els} elements (${SECTIONS} sections), ${ROUNDS} interleaved rounds`);
+  lines.push("");
+  lines.push("style resolution + layout, p25 of each variant:");
+  lines.push(`  unthemed baseline   ${base.toFixed(1)}ms`);
+  lines.push(`  current sheet       ${q(acc.current, 0.25).toFixed(1)}ms   (+${ovCurrent.toFixed(1)}ms)`);
+  lines.push(`  chained-SP sheet    ${q(acc.chained, 0.25).toFixed(1)}ms   (+${ovChained.toFixed(1)}ms)`);
+  lines.push("");
+  lines.push(`  current faster in   ${currentWins}/${ROUNDS} head-to-head rounds`);
+  lines.push(`  overhead saved      ${(ovChained - ovCurrent).toFixed(1)}ms  ` +
+             `(${ovChained > 0 ? Math.round((1 - ovCurrent / ovChained) * 100) : 0}% of the chained form's cost)`);
+  lines.push("");
+
+  const failed = results.filter((r) => !r.ok);
+  for (const r of results) {
+    lines.push(`  ${r.ok ? "PASS" : "FAIL"}  ${r.name}${r.detail ? "  [" + r.detail + "]" : ""}`);
+  }
+  lines.push("");
+  lines.push(failed.length ? `${failed.length} FAILED` : `all ${results.length} checks passed`);
+
+  const out = document.getElementById("out");
+  out.textContent = lines.join("\n");
+  out.className = failed.length ? "fail" : "pass";
+  window.__done = { failed: failed.length, ovCurrent, ovChained, currentWins, rounds: ROUNDS, els };
+}
+
+run().catch((e) => {
+  document.getElementById("out").textContent = "bench crashed: " + (e && e.stack || e);
+  document.getElementById("out").className = "fail";
+  window.__done = { failed: 1, error: String(e) };
+});
+</script>
+</body>
+</html>
