@@ -1,0 +1,125 @@
+@import "tailwindcss";
+
+/* Geist is beUI's typeface. Bundled rather than linked because MV3 forbids
+   remote resources, and vendored into the repo because node_modules is not
+   committed. One variable file per family covers every weight the popup uses.
+   SIL Open Font License 1.1 - see fonts/LICENSE.txt. */
+@font-face {
+  font-family: "Geist";
+  src: url("./fonts/Geist-Variable.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Geist Mono";
+  src: url("./fonts/GeistMono-Variable.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ---------------------------------------------------------------------------
+   beUI theme, copied verbatim from beui.dev's own stylesheet so the popup and
+   the injected page theme use the identical palette. Do not "tidy" these
+   values - they are the source of truth, and content.js mirrors the dark set.
+   --------------------------------------------------------------------------- */
+
+:root {
+  --background: oklch(99% 0 0);
+  --foreground: oklch(15% 0 0);
+  --card: oklch(97% 0 0);
+  --muted-foreground: oklch(50% 0 0);
+  --border: oklch(15% 0 0 / 0.06);
+  --border-strong: oklch(15% 0 0 / 0.12);
+  --accent-fg: oklch(15% 0 0);
+  --neon: oklch(80% 0.22 145);
+  --violet: oklch(68% 0.22 295);
+  --danger: oklch(62% 0.22 25);
+  --success: oklch(70% 0.18 155);
+  --warning: oklch(78% 0.18 75);
+  --glass-bg: oklch(99% 0 0 / 0.55);
+  --glass-border: oklch(15% 0 0 / 0.08);
+  --glass-strong-bg: #ffffffb3;
+  --glass-thin-bg: #ffffff73;
+  --gradient-bg: linear-gradient(135deg, oklch(99% 0 0), oklch(96% 0.008 210));
+  --gradient-accent: linear-gradient(90deg, oklch(72% 0.18 195) 0%, oklch(68% 0.22 295));
+  --card-foreground: var(--foreground);
+  --popover: var(--card);
+  --popover-foreground: var(--foreground);
+  --primary: var(--foreground);
+  --primary-foreground: var(--background);
+  --secondary: var(--card);
+  --secondary-foreground: var(--foreground);
+  --muted: var(--card);
+  --accent: oklch(72% 0.18 195);
+  --accent-foreground: var(--accent-fg);
+  --destructive: var(--danger);
+  --input: var(--border);
+  --ring: var(--border-strong);
+}
+
+.dark {
+  --background: #151515;
+  --foreground: oklch(96% 0 0);
+  --card: #1c1c1c;
+  --muted-foreground: oklch(62% 0 0);
+  --border: #ffffff0d;
+  --border-strong: #ffffff1a;
+  --accent: oklch(80% 0.18 195);
+  --accent-fg: #151515;
+  --glass-bg: #1c1c1c8c;
+  --glass-border: #ffffff14;
+  --glass-strong-bg: #1c1c1c99;
+  --glass-thin-bg: #15151573;
+  --gradient-bg: linear-gradient(135deg, oklch(19% 0 0), oklch(22% 0.008 210));
+  --gradient-accent: linear-gradient(90deg, oklch(80% 0.18 195) 0%, oklch(72% 0.22 295));
+}
+
+/* Expose the tokens to Tailwind's utility generator, so beUI's own class names
+   (bg-card, text-muted-foreground, bg-primary, border-border, ring-ring ...)
+   resolve to the values above rather than to Tailwind's defaults. */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-neon: var(--neon);
+  --color-violet: var(--violet);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, monospace;
+}
+
+/* The popup is the UI of a dark-mode tool, so it is always dark. */
+html {
+  color-scheme: dark;
+}
+
+body {
+  width: 320px;
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}

@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Dark Night service worker harness</title>
+  <style>
+    body { font: 13px/1.5 ui-monospace, Menlo, monospace; margin: 20px; background: #fdfdfb; color: #222; }
+    #out { white-space: pre; }
+    .pass { color: #1a7f37; }
+    .fail { color: #c00; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>Dark Night service worker harness</h1>
+  <div id="out">running...</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Loads the REAL background.js against a mocked MV3 surface and drives it as a
+// black box: every assertion goes through the chrome APIs the worker actually
+// calls. Each scenario gets a fresh worker instance, because background.js runs
+// reconcile() at top level exactly as Chrome does on a cold start.
+// ---------------------------------------------------------------------------
+const results = [];
+function check(name, cond, detail) {
+  results.push({ name, pass: !!cond, detail: detail === undefined ? "" : String(detail) });
+  paint();
+}
+function paint(done) {
+  const failed = results.filter((r) => !r.pass).length;
+  document.getElementById("out").innerHTML =
+    results.map((r) =>
+      `<span class="${r.pass ? "pass" : "fail"}">${r.pass ? "PASS" : "FAIL"}</span>  ${r.name}${r.detail ? "  [" + r.detail + "]" : ""}`
+    ).join("\n") +
+    `\n\n${results.length - failed}/${results.length} passed` + (done ? "" : "  ... still running");
+}
+const tick = (ms = 10) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(fn, ms = 3000) {
+  const t0 = performance.now();
+  while (performance.now() - t0 < ms) {
+    try { if (fn()) return true; } catch (e) { /* not ready */ }
+    await tick(10);
+  }
+  return false;
+}
+
+let W;   // the world the worker under test sees
+
+function makeWorld({ sync = {}, session = {}, tabs = [], injectFails = false, queryFails = false } = {}) {
+  const w = {
+    sync: { enabled: true, disabledSites: [], ...sync },
+    session: { ...session },
+    tabs,
+    registered: [],            // registered content scripts, by id
+    calls: [],                 // every scripting call, in order
+    badges: [],                // every setBadgeText call
+    injected: [],              // tabIds executeScript ran against
+    injectFails,
+    queryFails,
+    listeners: { changed: [], command: [], installed: [], startup: [], activated: [], updated: [] },
+    warnings: []
+  };
+
+  w.chrome = {
+    runtime: {
+      id: "dark-night-worker-test",
+      onInstalled: { addListener: (fn) => w.listeners.installed.push(fn) },
+      onStartup: { addListener: (fn) => w.listeners.startup.push(fn) }
+    },
+    storage: {
+      sync: { get: async (defaults) => ({ ...defaults, ...w.sync }),
+              set: async (patch) => {
+                const changes = {};
+                for (const [k, v] of Object.entries(patch)) {
+                  changes[k] = { oldValue: w.sync[k], newValue: v };
+                  w.sync[k] = v;
+                }
+                w.listeners.changed.forEach((fn) => fn(changes, "sync"));
+              } },
+      session: { get: async (defaults) => ({ ...defaults, ...w.session }),
+                 set: async (patch) => Object.assign(w.session, patch) },
+      onChanged: { addListener: (fn) => w.listeners.changed.push(fn) }
+    },
+    scripting: {
+      getRegisteredContentScripts: async ({ ids }) => w.registered.filter((s) => ids.includes(s.id)),
+      registerContentScripts: async ([spec]) => {
+        w.calls.push("register");
+        if (w.registered.some((s) => s.id === spec.id)) throw new Error("duplicate id " + spec.id);
+        w.registered.push({ ...spec });
+      },
+      updateContentScripts: async ([spec]) => {
+        w.calls.push("update");
+        const i = w.registered.findIndex((s) => s.id === spec.id);
+        if (i < 0) throw new Error("not registered");
+        // Chrome MERGES: properties not supplied keep their previous value.
+        w.registered[i] = { ...w.registered[i], ...spec };
+      },
+      unregisterContentScripts: async ({ ids }) => {
+        w.calls.push("unregister");
+        if (!w.registered.some((s) => ids.includes(s.id))) throw new Error("nothing registered");
+        w.registered = w.registered.filter((s) => !ids.includes(s.id));
+      },
+      executeScript: async ({ target }) => {
+        if (w.injectFails) throw new Error("cannot access page");
+        w.injected.push(target.tabId);
+      }
+    },
+    tabs: {
+      query: async (q) => {
+        if (w.queryFails) throw new Error("tabs unavailable");
+        return q.active ? w.tabs.filter((t) => t.active) : w.tabs;
+      },
+      get: async (id) => w.tabs.find((t) => t.id === id),
+      onActivated: { addListener: (fn) => w.listeners.activated.push(fn) },
+      onUpdated: { addListener: (fn, filter) => { w.updateFilter = filter; w.listeners.updated.push(fn); } }
+    },
+    action: {
+      setBadgeText: async (o) => { w.badges.push(o); },
+      setBadgeBackgroundColor: async () => {}
+    },
+    commands: { onCommand: { addListener: (fn) => w.listeners.command.push(fn) } }
+  };
+  return w;
+}
+
+const badgeFor = (tabId) => {
+  const hit = [...W.badges].reverse().find((b) => b.tabId === tabId);
+  return hit ? hit.text : "(none)";
+};
+const globalBadge = () => {
+  const hit = [...W.badges].reverse().find((b) => b.tabId === undefined);
+  return hit ? hit.text : "(none)";
+};
+const early = () => W.registered.find((s) => s.id === "dark-night-early");
+
+const realWarn = console.warn;
+console.warn = (...a) => { if (W) W.warnings.push(a.join(" ")); realWarn(...a); };
+
+let workerSrc = "";
+// A cold start: a fresh worker instance against the given world.
+async function boot(world) {
+  W = world;
+  // The mock stays installed for the rest of the scenario. background.js looks
+  // `chrome` up globally on every call, and most of its work happens after an
+  // await - restoring the page's chrome straight after boot would leave the
+  // worker talking to the wrong object for everything except registration.
+  window.chrome = W.chrome;
+  new Function(workerSrc)();
+  await tick(60);
+  return W;
+}
+
+// ---------------------------------------------------------------------------
+async function run() {
+  workerSrc = await (await fetch("../background.js?t=" + performance.now(), { cache: "no-store" })).text();
+
+  const TABS = [
+    { id: 1, active: true, url: "https://example.com/" },
+    { id: 2, active: false, url: "https://docs.google.com/" }
+  ];
+
+  // --- cold start, nothing excluded ----------------------------------------
+  await boot(makeWorld({ tabs: TABS }));
+  await waitFor(() => early());
+  check("worker: registers the pre-paint stylesheet on a cold start", !!early());
+  check("worker: registration covers http and https in all frames",
+    early() && early().allFrames === true && early().runAt === "document_start" &&
+    early().css.join() === "early.css", JSON.stringify(early() && early().matches));
+  check("worker: no exclusions means no excludeMatches",
+    early() && early().excludeMatches === undefined, JSON.stringify(early() && early().excludeMatches));
+  check("badge: clear when everything is on", globalBadge() === "", globalBadge());
+  check("badge: active tab painted on boot", badgeFor(1) === "", badgeFor(1));
+
+  // --- regression: re-registering on every worker start ---------------------
+  // A cold start with an already-correct empty exclusion list must leave the
+  // registration alone; dropping and re-adding it opens a window in which a
+  // loading page gets no pre-paint sheet and flashes white.
+  const carried = makeWorld({ tabs: TABS });
+  carried.registered = [{ id: "dark-night-early", matches: ["http://*/*", "https://*/*"], css: ["early.css"] }];
+  await boot(carried);
+  await tick(80);
+  check("worker: an already-correct registration is left untouched",
+    !W.calls.includes("unregister") && !W.calls.includes("register"), W.calls.join(",") || "(no calls)");
+
+  // --- excluding a site adds excludeMatches ---------------------------------
+  await boot(makeWorld({ tabs: TABS }));
+  await waitFor(() => early());
+  await W.chrome.storage.sync.set({ disabledSites: ["example.com"] });
+  await waitFor(() => early() && early().excludeMatches);
+  check("per-site: exclusion reaches the pre-paint registration",
+    JSON.stringify(early().excludeMatches) === '["*://example.com/*","*://*.example.com/*"]',
+    JSON.stringify(early().excludeMatches));
+  check("badge: excluded tab reads 'site'", badgeFor(1) === "site", badgeFor(1));
+  check("badge: unrelated tab is not marked", badgeFor(2) !== "site", badgeFor(2));
+
+  // --- regression: updateContentScripts MERGES, so clearing needs a re-register
+  await W.chrome.storage.sync.set({ disabledSites: [] });
+  await waitFor(() => early() && early().excludeMatches === undefined);
+  check("per-site: re-enabling the last site actually clears excludeMatches",
+    early() && early().excludeMatches === undefined,
+    JSON.stringify(early() && early().excludeMatches));
+  check("per-site: it did so by re-registering, not by a merging update",
+    W.calls.includes("unregister"), W.calls.join(","));
+  check("badge: clears once the site is re-enabled", badgeFor(1) === "", badgeFor(1));
+
+  // --- master switch off ----------------------------------------------------
+  await boot(makeWorld({ tabs: TABS }));
+  await waitFor(() => early());
+  await W.chrome.storage.sync.set({ enabled: false });
+  await waitFor(() => !early());
+  check("master off: pre-paint stylesheet is unregistered", !early());
+  check("master off: badge reads 'off'", globalBadge() === "off", globalBadge());
+  await W.chrome.storage.sync.set({ enabled: true });
+  await waitFor(() => !!early());
+  check("master on: registration comes back", !!early());
+  check("master on: badge clears", globalBadge() === "", globalBadge());
+
+  // --- adopting tabs that were already open ---------------------------------
+  await boot(makeWorld({ tabs: TABS }));
+  await waitFor(() => W.injected.length === 2);
+  check("adopt: open tabs are injected once per extension load",
+    JSON.stringify(W.injected.sort()) === "[1,2]", JSON.stringify(W.injected));
+  check("adopt: the pass is flagged in session storage", W.session.adopted === true);
+
+  // A worker respawn - session storage survives, so it must NOT inject again.
+  const respawn = makeWorld({ tabs: TABS, session: { adopted: true } });
+  await boot(respawn);
+  await tick(80);
+  check("adopt: a worker respawn does not re-inject every tab",
+    W.injected.length === 0, JSON.stringify(W.injected));
+
+  // A single unreachable tab is normal (Web Store, PDF viewer) and must not
+  // stop the pass or leave it looking failed.
+  const partial = makeWorld({ tabs: TABS, injectFails: true });
+  await boot(partial);
+  await tick(120);
+  check("adopt: unreachable tabs do not abort the pass", partial.session.adopted === true,
+    "adopted=" + partial.session.adopted);
+
+  // regression: the flag used to be set before the injection it guards, so a
+  // pass that genuinely failed was remembered as done and never retried.
+  const failing = makeWorld({ tabs: TABS, queryFails: true });
+  await boot(failing);
+  await tick(120);
+  check("adopt: a genuinely failed pass is not remembered as done",
+    failing.session.adopted !== true, "adopted=" + failing.session.adopted);
+  check("adopt: and it says why", failing.warnings.some((x) => x.includes("adopt")),
+    failing.warnings.join(" | "));
+  // regression: reconcile() ran its three steps in one unguarded chain, so a
+  // transient tabs failure in the badge pass cancelled the pre-paint
+  // registration too and surfaced only as an unhandled rejection.
+  check("resilience: a failing badge pass does not block the registration",
+    !!early(), JSON.stringify(failing.registered));
+  check("resilience: the badge failure is reported, not swallowed",
+    failing.warnings.some((x) => x.includes("badge")), failing.warnings.join(" | "));
+
+  // --- keyboard shortcut ----------------------------------------------------
+  await boot(makeWorld({ tabs: TABS }));
+  const fire = () => W.listeners.command.forEach((fn) => fn("toggle-dark"));
+  fire();
+  await waitFor(() => W.sync.enabled === false);
+  check("shortcut: toggles the master switch", W.sync.enabled === false, String(W.sync.enabled));
+  // regression: an unserialized read-modify-write meant two fast presses netted
+  // to a single toggle, because both read the same value before either wrote.
+  fire(); fire();
+  await tick(120);
+  check("shortcut: two rapid presses are two toggles, not one",
+    W.sync.enabled === false, "enabled=" + W.sync.enabled);
+  check("shortcut: an unknown command is ignored", (() => {
+    const before = W.sync.enabled;
+    W.listeners.command.forEach((fn) => fn("something-else"));
+    return W.sync.enabled === before;
+  })());
+
+  // --- tab events -----------------------------------------------------------
+  await boot(makeWorld({ tabs: TABS, sync: { disabledSites: ["docs.google.com"] } }));
+  await waitFor(() => early());
+  check("badge: onUpdated is filtered to status and url",
+    W.updateFilter && JSON.stringify(W.updateFilter.properties.sort()) === '["status","url"]',
+    JSON.stringify(W.updateFilter));
+  W.listeners.activated.forEach((fn) => fn({ tabId: 2 }));
+  await waitFor(() => badgeFor(2) === "site");
+  check("badge: switching to an excluded tab marks it", badgeFor(2) === "site", badgeFor(2));
+  W.listeners.updated.forEach((fn) => fn(1, { status: "complete" }, TABS[0]));
+  await waitFor(() => badgeFor(1) === "");
+  check("badge: navigating an allowed tab clears it", badgeFor(1) === "", badgeFor(1));
+
+  // --- host matching parity with content.js ---------------------------------
+  await boot(makeWorld({ tabs: [{ id: 1, active: true, url: "https://mail.google.com/" }],
+                         sync: { disabledSites: ["google.com"] } }));
+  await waitFor(() => W.badges.length > 0);
+  check("hosts: a parent-domain rule marks the subdomain tab", badgeFor(1) === "site", badgeFor(1));
+
+  await boot(makeWorld({ tabs: [{ id: 1, active: true, url: "https://notexample.com/" }],
+                         sync: { disabledSites: ["example.com"] } }));
+  await waitFor(() => W.badges.length > 0);
+  check("hosts: a lookalike suffix is not treated as a match", badgeFor(1) === "", badgeFor(1));
+
+  await boot(makeWorld({ tabs: [{ id: 1, active: true, url: "https://www.example.com/" }],
+                         sync: { disabledSites: ["example.com"] } }));
+  await waitFor(() => W.badges.length > 0);
+  check("hosts: a leading www. is ignored", badgeFor(1) === "site", badgeFor(1));
+
+  // --- restricted pages -----------------------------------------------------
+  await boot(makeWorld({ tabs: [{ id: 1, active: true, url: "chrome://extensions" }] }));
+  await waitFor(() => W.badges.length > 0);
+  check("restricted: a chrome:// tab gets no per-site marking", badgeFor(1) === "", badgeFor(1));
+
+  // --- entries that cannot become match patterns ----------------------------
+  await boot(makeWorld({ tabs: TABS, sync: { disabledSites: ["example.com", "not a host!", "::1"] } }));
+  await waitFor(() => early());
+  check("patterns: unusable entries are dropped rather than breaking registration",
+    early() && JSON.stringify(early().excludeMatches) === '["*://example.com/*","*://*.example.com/*"]',
+    JSON.stringify(early() && early().excludeMatches));
+  check("patterns: the registration still succeeded", !!early());
+
+  // --- corrupt storage ------------------------------------------------------
+  await boot(makeWorld({ tabs: TABS, sync: { disabledSites: "not-an-array", enabled: undefined } }));
+  await tick(120);
+  check("corrupt storage: worker still registers without throwing", !!early());
+  check("corrupt storage: nothing was logged as a failure",
+    W.warnings.length === 0, W.warnings.join(" | "));
+}
+
+(async () => {
+  try { await run(); }
+  catch (e) { check("harness ran without throwing", false, (e && e.message) + " " + ((e && e.stack || "").split("\n")[1] || "")); }
+  paint(true);
+})();
+</script>
+</body>
+</html>

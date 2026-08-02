@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Dark Night test harness</title>
+  <style>
+    body { font: 13px/1.5 ui-monospace, Menlo, monospace; margin: 20px; background: #fdfdfb; color: #222; }
+    #out { white-space: pre; }
+    .pass { color: #1a7f37; }
+    .fail { color: #c00; font-weight: bold; }
+    #sample { border: 1px solid #ccc; padding: 10px; margin: 12px 0; background: #f0efe9; }
+    .caret { width: 0; height: 0; border: 6px solid transparent; border-top-color: #333; }
+  </style>
+</head>
+<body>
+  <h1>Dark Night harness</h1>
+  <div id="sample">
+    <p>Sample light content <a id="plainLink" href="#">link</a></p>
+    <p><a id="spanLink" href="#"><span id="spanInLink">span inside link</span></a></p>
+    <a id="cardLink" href="#">
+      <article>
+        <h3 id="cardHeading">Card headline</h3>
+        <p id="cardBody">Card body text that must not turn link-blue.</p>
+      </article>
+    </a>
+    <button id="btn">Button</button>
+    <input id="inp" placeholder="Input" />
+    <div class="caret" id="caret"></div>
+    <div id="gradientBox" style="background-image: linear-gradient(#fff, #eee); padding: 4px">gradient band</div>
+    <img id="img1" alt="" width="8" height="8" />
+    <!-- a site design system that fights back with !important -->
+    <div class="site-card" id="siteImportant">class + !important</div>
+    <div id="siteIdImportant">id + !important</div>
+    <svg width="10" height="10"><rect id="blackIcon" width="10" height="10" fill="#000" /></svg>
+    <svg width="10" height="10"><rect id="colourIcon" width="10" height="10" fill="#dc3232" /></svg>
+    <svg width="10" height="10"><mask id="m"><rect id="maskedBlack" width="10" height="10" fill="#000" /></mask></svg>
+    <div id="shadowHost"></div>
+    <!-- stands in for a custom element awaiting its definition -->
+    <div id="upgradeHost"></div>
+    <!-- a real one: defined later, mid-suite, exactly like a code-split bundle -->
+    <late-el id="lateComponent"></late-el>
+    <div id="accent">accent bar drawn with ::before</div>
+  </div>
+  <div id="out">running...</div>
+
+  <style>
+    /* Stands in for a real site's stylesheet. Both rules outrank a bare `*`. */
+    .site-card { background-color: #ffffff !important; }
+    #siteIdImportant { background-color: #ffffff !important; }
+    /* A coloured accent bar - the classic decorative pseudo-element. */
+    #accent::before { content: ""; display: block; width: 20px; height: 3px; background-color: #2563eb; }
+  </style>
+  <script>
+    // Built before content.js loads, so the initial scan has to find them.
+    (() => {
+      const root = document.getElementById("shadowHost").attachShadow({ mode: "open" });
+      root.innerHTML = '<div id="sInner">shadow surface</div><span id="sNestedHost"></span>';
+      const nested = root.getElementById("sNestedHost").attachShadow({ mode: "open" });
+      nested.innerHTML = '<div id="sDeep">nested shadow surface</div>';
+    })();
+  </script>
+
+<script>
+// ---------------------------------------------------------------------------
+// chrome API mock. Must exist before content.js loads.
+// ---------------------------------------------------------------------------
+const params = new URLSearchParams(location.search);
+const MODE = params.get("suite") || "main";
+
+const store = {};
+const changeListeners = [];
+const listenerErrors = [];
+let heldGet = null;
+
+window.chrome = {
+  runtime: { id: "dark-night-test", lastError: null },
+  storage: {
+    sync: {
+      get(defaults, cb) {
+        const snapshot = { ...defaults, ...store };
+        if (MODE === "pending") heldGet = () => cb(snapshot);   // harness controls delivery
+        else setTimeout(() => cb(snapshot), 0);
+      },
+      set(patch, cb) {
+        const changes = {};
+        for (const [k, v] of Object.entries(patch)) {
+          changes[k] = { oldValue: store[k], newValue: v };
+          store[k] = v;
+        }
+        const dispatch = () => {
+          // Chrome isolates a throwing listener; model that, and record it so a
+          // crash surfaces as a failure instead of a hang.
+          changeListeners.forEach((fn) => {
+            try { fn(changes, "sync"); }
+            catch (err) { listenerErrors.push(err && (err.message || String(err))); }
+          });
+          if (cb) cb();
+        };
+        if (MODE === "pending") dispatch();
+        else setTimeout(dispatch, 0);
+      }
+    },
+    onChanged: { addListener(fn) { changeListeners.push(fn); } }
+  }
+};
+
+const set = (patch) => new Promise((r) => chrome.storage.sync.set(patch, r));
+const tick = (ms = 30) => new Promise((r) => setTimeout(r, ms));
+
+// ---------------------------------------------------------------------------
+const results = [];
+function check(name, cond, detail) {
+  results.push({ name, pass: !!cond, detail: detail === undefined ? "" : String(detail) });
+  paint();
+}
+function paint(done) {
+  const failed = results.filter((r) => !r.pass).length;
+  document.getElementById("out").innerHTML =
+    results.map((r) =>
+      `<span class="${r.pass ? "pass" : "fail"}">${r.pass ? "PASS" : "FAIL"}</span>  ${r.name}${r.detail ? "  [" + r.detail + "]" : ""}`
+    ).join("\n") +
+    `\n\n${results.length - failed}/${results.length} passed` +
+    (done ? "" : "  ... still running");
+}
+
+const styleEl = () => document.getElementById("dark-night-style");
+const css = () => (styleEl() ? styleEl().textContent : "");
+const htmlFilter = () => getComputedStyle(document.documentElement).filter;
+const bodyBg = () => getComputedStyle(document.body).backgroundColor;
+const colorOf = (id) => getComputedStyle(document.getElementById(id)).color;
+const norm = (s) => s.replace(/\s+/g, " ").trim();
+// Comments in the generated sheet mention selectors by name; assertions about
+// selector shape have to look at the rules, not the prose about them.
+const bare = () => css().replace(/\/\*[\s\S]*?\*\//g, "");
+// Every declared rule must survive the CSS parser: a selector list is dropped
+// whole when any one of its selectors is unrecognised.
+function allRulesParse() {
+  const s = document.createElement("style");
+  s.textContent = css();
+  document.head.appendChild(s);
+  const declared = (bare().match(/\{/g) || []).length;
+  const parsed = s.sheet.cssRules.length;
+  s.remove();
+  return { ok: parsed === declared, detail: parsed + " parsed / " + declared + " declared" };
+}
+
+// beUI dark tokens. Chrome reports oklch colours in their own space, so these
+// are the computed-style forms of --accent, --foreground and --background.
+const LINK = "oklch(0.8 0.18 195)";   // --accent
+const TEXT = "oklch(0.96 0 0)";       // --foreground
+const DARK = "rgb(21, 21, 21)";       // --background #151515
+const CARD = "rgb(28, 28, 28)";       // --card #1c1c1c
+
+// The palette is no longer monochrome - it is beUI's. What matters now is that
+// the injected sheet uses beUI's own token values and nothing else, so a themed
+// page and the popup cannot drift apart.
+const BEUI_TOKENS = {
+  background: "#151515",
+  card: "#1c1c1c",
+  foreground: "oklch(96% 0 0)",
+  muted: "oklch(62% 0 0)",
+  border: "#ffffff1a",
+  accent: "oklch(80% 0.18 195)",
+  violet: "oklch(68% 0.22 295)"
+};
+
+// Any colour literal in the sheet that is not one of beUI's tokens (or one of
+// the few mechanism colours that are not palette at all).
+function offPalette(cssText) {
+  const allowed = new Set([
+    ...Object.values(BEUI_TOKENS).map((v) => v.toLowerCase()),
+    "oklch(38% 0 0)",      // scrollbar thumb, beUI greyscale
+    "#eaeaea",             // filter mode: inverts to #151515
+    "rgba(0, 0, 0, 0.7)"   // elevation drop shadow
+  ]);
+  const declarations = cssText
+    .replace(/\/\*[\s\S]*?\*\//g, "")     // prose mentions colours by name
+    .replace(/\[[^\]]*\]/g, "");           // [fill="#000"] matches a colour, is not one
+  const found = declarations.match(/#[0-9a-f]{3,8}\b|oklch\([^)]*\)|rgba?\([^)]*\)/gi) || [];
+  return [...new Set(found.map((c) => c.toLowerCase()))].filter((c) => !allowed.has(c));
+}
+
+// ---------------------------------------------------------------------------
+// Load the REAL content.js, instrumented to expose internals. The production
+// file is never modified - the transform happens here at test time.
+// ---------------------------------------------------------------------------
+async function loadContentScript() {
+  const src = await (await fetch("../content.js?" + MODE + "&t=" + performance.now(), { cache: "no-store" })).text();
+  const marker = /\}\)\(\);\s*$/;
+  if (!marker.test(src)) throw new Error("content.js does not end in the expected IIFE form");
+  new Function(src.replace(marker,
+    `  window.__mm = {
+       buildCss, buildDynamicCss, buildFilterCss, cssFilterValue,
+       siteDisabled, HOST, DEFAULTS, READY_ATTR,
+       get settings() { return settings; },
+       get observer() { return observer; }
+     };
+   })();`
+  ))();
+}
+
+// ---------------------------------------------------------------------------
+// Suite: a write that lands between the initial read and its callback
+// ---------------------------------------------------------------------------
+async function pendingSuite() {
+  check("pending: initial read is still in flight", !!heldGet && !styleEl());
+  await set({ mode: "filter", brightness: 130 });   // dispatched while settings === null
+  check("pending: nothing applied yet", !styleEl());
+  heldGet();                                        // stale snapshot arrives now
+  await tick();
+  check(
+    "pending: change replayed, not dropped",
+    css().includes("invert(1)"),
+    "mode=" + (window.__mm.settings || {}).mode
+  );
+  check(
+    "pending: every replayed key survived",
+    window.__mm.settings.brightness === 130,
+    "brightness=" + window.__mm.settings.brightness
+  );
+  check(
+    "pending: replayed value reached the page",
+    htmlFilter().includes("brightness(1.3)"),
+    htmlFilter()
+  );
+}
+
+// ---------------------------------------------------------------------------
+async function mainSuite() {
+  await tick(40);
+
+  // --- defaults / dynamic mode ---
+  check("style element injected on load", !!styleEl());
+  check("pre-paint sheet released", document.documentElement.hasAttribute("data-dark-night-ready"));
+  check("dynamic: color-scheme dark", css().includes("color-scheme: dark"));
+  check("dynamic: body renders dark", bodyBg() === DARK, bodyBg());
+  check("dynamic: no invert filter applied", htmlFilter() === "none", htmlFilter());
+  check("dynamic: input styled dark", getComputedStyle($id("inp")).backgroundColor === CARD,
+    getComputedStyle($id("inp")).backgroundColor);
+
+  // --- link colouring (regression: `a *` blued entire link-wrapped cards) ---
+  check("links: plain anchor uses the link colour", colorOf("plainLink") === LINK, colorOf("plainLink"));
+  check("links: span inside link uses the link colour", colorOf("spanInLink") === LINK, colorOf("spanInLink"));
+  check("links: heading in link-wrapped card is body text", colorOf("cardHeading") === TEXT, colorOf("cardHeading"));
+  check("links: body in link-wrapped card is body text", colorOf("cardBody") === TEXT, colorOf("cardBody"));
+
+  // --- focus ring (regression: box-shadow:none killed focus indicators) ---
+  check("a11y: focus-visible outline defined", css().includes(":focus-visible"));
+  check("a11y: box-shadow not nulled globally", !css().includes("box-shadow: none"));
+
+  // --- transparent borders (regression: CSS-triangle carets became squares) ---
+  // Selectors carry a specificity booster, so match the block by shape.
+  const universalBlock = (css().match(/\*[^{]*::after \{[^}]*\}/) || [""])[0];
+  check("borders: universal rule no longer sets border-color",
+    universalBlock && !universalBlock.includes("border-color"), norm(universalBlock));
+  check(
+    "borders: transparent caret border preserved",
+    getComputedStyle($id("caret")).borderLeftColor === "rgba(0, 0, 0, 0)",
+    getComputedStyle($id("caret")).borderLeftColor
+  );
+  check("borders: form controls still get a border colour", /input[^{]*button[^{]*\{[^}]*border-color/.test(css()));
+
+  // --- light gradients/background images (regression: light band, white text) ---
+  check("bg: gradient header neutralized",
+    getComputedStyle($id("gradientBox")).backgroundImage === "none",
+    getComputedStyle($id("gradientBox")).backgroundImage);
+  check("bg: pseudo-elements keep their background-image (sprite icons)",
+    !/\*[^{]*::after \{[^}]*background-image/.test(css()));
+
+  // --- specificity (regression: `*` lost to any site rule that paired a class
+  //     with !important, which is why whole apps stayed white) ---
+  check("specificity: class + !important is still themed",
+    getComputedStyle($id("siteImportant")).backgroundColor === DARK,
+    getComputedStyle($id("siteImportant")).backgroundColor);
+  check("specificity: id + !important is still themed",
+    getComputedStyle($id("siteIdImportant")).backgroundColor === DARK,
+    getComputedStyle($id("siteIdImportant")).backgroundColor);
+  check("specificity: booster can never match a real element",
+    css().includes(":not(#\\9)"));
+  check("specificity: images still win over the universal rule",
+    getComputedStyle($id("img1")).backgroundColor === "rgba(0, 0, 0, 0)",
+    getComputedStyle($id("img1")).backgroundColor);
+  check("specificity: links still win over the universal rule",
+    colorOf("plainLink") === LINK, colorOf("plainLink"));
+
+  // --- svg icons (regression: hard-coded black fills vanished into the dark) ---
+  check("icons: hard-coded black fill remapped",
+    getComputedStyle($id("blackIcon")).fill === TEXT,
+    getComputedStyle($id("blackIcon")).fill);
+  check("icons: coloured fill untouched",
+    getComputedStyle($id("colourIcon")).fill === "rgb(220, 50, 50)",
+    getComputedStyle($id("colourIcon")).fill);
+  // black inside a <mask> is a channel value, not a colour - recolouring it
+  // would reveal whatever the mask hides
+  check("icons: black inside a mask is left alone",
+    getComputedStyle($id("maskedBlack")).fill === "rgb(0, 0, 0)",
+    getComputedStyle($id("maskedBlack")).fill);
+
+  // --- shadow DOM (regression: a <style> in head never crosses a shadow
+  //     boundary and background-color does not inherit, so component-based
+  //     apps kept their light surfaces) ---
+  const sh = $id("shadowHost").shadowRoot;
+  check("shadow: open root is themed", getComputedStyle(sh.getElementById("sInner")).backgroundColor === DARK,
+    getComputedStyle(sh.getElementById("sInner")).backgroundColor);
+  const nested = sh.getElementById("sNestedHost").shadowRoot;
+  check("shadow: nested root is themed", getComputedStyle(nested.getElementById("sDeep")).backgroundColor === DARK,
+    getComputedStyle(nested.getElementById("sDeep")).backgroundColor);
+  // a root attached after load must be picked up by the observer
+  const lateHost = document.createElement("div");
+  document.body.appendChild(lateHost);
+  const lateRoot = lateHost.attachShadow({ mode: "open" });
+  lateRoot.innerHTML = '<div id="late">late</div>';
+  await tick(200);
+  check("shadow: root attached after load is themed",
+    getComputedStyle(lateRoot.getElementById("late")).backgroundColor === DARK,
+    getComputedStyle(lateRoot.getElementById("late")).backgroundColor);
+
+  // regression: a custom element already in the DOM when its definition loads is
+  // upgraded in place - attachShadow() runs in the constructor and emits NO
+  // mutation record, so the observer alone never finds it. Simulated here by
+  // attaching to an element that was inserted long before.
+  const upgraded = $id("upgradeHost");
+  const upgradedRoot = upgraded.attachShadow({ mode: "open" });
+  upgradedRoot.innerHTML = '<div id="upgradedInner">upgraded in place</div>';
+  await tick(700);   // the first decaying sweep runs at 300ms
+  check("shadow: element upgraded in place (no mutation record) is themed",
+    getComputedStyle(upgradedRoot.getElementById("upgradedInner")).backgroundColor === DARK,
+    getComputedStyle(upgradedRoot.getElementById("upgradedInner")).backgroundColor);
+
+  // The same thing for real: <late-el> is in the static markup, its definition
+  // arrives now, and it renders a surface with an explicit light background -
+  // the exact shape of a code-split component bundle.
+  customElements.define("late-el", class extends HTMLElement {
+    connectedCallback() {
+      const r = this.attachShadow({ mode: "open" });
+      r.innerHTML = '<style>.surface{background:#fff}</style><div class="surface" id="lateSurface">late component</div>';
+    }
+  });
+  await tick(1400);
+  const lateEl = $id("lateComponent");
+  check("shadow: a real customElements.define upgrade is themed",
+    getComputedStyle(lateEl.shadowRoot.getElementById("lateSurface")).backgroundColor === DARK,
+    getComputedStyle(lateEl.shadowRoot.getElementById("lateSurface")).backgroundColor);
+
+  // --- decorative pseudo-elements (regression: every ::before/::after overlay
+  //     became an opaque dark block, killing accent bars and tooltip arrows) ---
+  check("pseudo: universal background rule excludes pseudo-elements",
+    !/\*[^{]*::after \{[^}]*background-color/.test(css()));
+  check("pseudo: author background survives",
+    getComputedStyle($id("accent"), "::before").backgroundColor === "rgb(37, 99, 235)",
+    getComputedStyle($id("accent"), "::before").backgroundColor);
+  check("pseudo: text colour still applies to pseudo-elements",
+    /\*[^{]*::after \{[^}]*color:/.test(css()));
+
+  // --- interaction feedback (regression: one flat background erased every
+  //     hover and selected state, so the UI stopped responding visually) ---
+  check("states: hover repaints interactive elements",
+    /:hover[^{]*\{[^}]*background-color: #1c1c1c/.test(css()));
+  check("states: hover repaints descendants too",
+    /button[^{]*:hover \*[^{]*\{[\s\S]{0,200}?#1c1c1c/.test(css()));
+  check("states: nested list hover is scoped to the innermost item",
+    css().includes(":hover:not(:has(li:hover))"));
+  // Same containment rule as the top-layer selectors: :has() must not be able to
+  // invalidate the main hover list.
+  // The :has() selectors must sit in a rule of their own, so an older parser
+  // rejecting them cannot take the main hover list down too.
+  const hoverRules = bare().split("}").filter((r) => r.includes(":hover"));
+  check("states: :has() is isolated in its own rule",
+    hoverRules.length >= 2 && hoverRules.filter((r) => r.includes(":has(")).every((r) => !r.includes('[role="tab"]')),
+    hoverRules.length + " hover rules");
+  const dParse = allRulesParse();
+  check("dynamic: every generated rule parses in this browser", dParse.ok, dParse.detail);
+  check("states: aria-selected gets a distinct surface",
+    /\[aria-selected="true"\][^{]*\{[^}]*background-color: color-mix/.test(css()));
+  check("states: aria-current=false is excluded",
+    css().includes('[aria-current="false"]'));
+
+  // --- elevation + hairlines ---
+  check("elevation: menus and dialogs get a visible ring",
+    /\[role="menu"\][\s\S]{0,400}?box-shadow: 0 0 0 1px/.test(css()));
+  check("elevation: no global box-shadow reset", !css().includes("box-shadow: none"));
+  check("borders: table hairlines remapped", /hr[^{]*table[^{]*\{[^}]*border-color/.test(css()));
+  check("borders: caret still transparent after the table rule",
+    getComputedStyle($id("caret")).borderLeftColor === "rgba(0, 0, 0, 0)",
+    getComputedStyle($id("caret")).borderLeftColor);
+
+  // --- sliders in dynamic mode ---
+  await set({ brightness: 120, contrast: 110 });
+  await tick();
+  check("dynamic+sliders: no invert", !htmlFilter().includes("invert"), htmlFilter());
+  check("dynamic+sliders: values applied",
+    htmlFilter().includes("brightness(1.2)") && htmlFilter().includes("contrast(1.1)"), htmlFilter());
+
+  // --- filter mode ---
+  await set({ mode: "filter" });
+  await tick();
+  check("filter: invert applied to html", htmlFilter().includes("invert(1)"), htmlFilter());
+  check("filter: sliders compose after invert",
+    /invert\(1\).*hue-rotate\(180deg\).*brightness\(1\.2\).*contrast\(1\.1\)/.test(htmlFilter()), htmlFilter());
+  // The rule that re-inverts media: the one that both names <img> and applies an
+  // invert. Located by shape so it cannot be confused with the top-layer or
+  // fullscreen rules, which also set a filter.
+  const reInvert = bare().split("}").find((r) => /(^|\n)\s*img,/.test(r) && r.includes("invert(1)")) || "";
+  check("filter: media re-inverted", /img, video, embed, object/.test(reInvert), norm(reInvert));
+  // regression: re-inverting a frame cancelled the root filter, so any frame the
+  // content script could not enter rendered as a bright white box
+  check("filter: iframes are not re-inverted", !reInvert.includes("iframe"), norm(reInvert));
+  // regression: canvas-rendered app surfaces (Sheets grid) stayed white
+  check("filter: canvas is not re-inverted", !reInvert.includes("canvas"), norm(reInvert));
+  // regression: top-layer elements are painted outside <html>, so the root
+  // filter never reached them and modals stayed white
+  check("filter: top layer gets its own filter pass", /:modal[^{]*\{[^}]*filter:/.test(css()));
+  check("filter: fullscreen media excluded from the top-layer pass",
+    /:fullscreen:not\(img\):not\(video\):not\(canvas\)/.test(css()));
+  // A selector list is dropped WHOLE when the parser rejects any one selector in
+  // it, so pairing :modal with the newer :popover-open would silently take
+  // modals down on an older Chrome. Each must stand alone.
+  check("filter: newer top-layer selectors are isolated from :modal",
+    /:modal \{/.test(bare()) && !/:modal[^{]*,/.test(bare()), norm((bare().match(/:modal[^{]*\{/) || [""])[0]));
+  const fParse = allRulesParse();
+  check("filter: every generated rule parses in this browser", fParse.ok, fParse.detail);
+  // regression: a site serving its own dark theme got inverted to blinding white
+  check("filter: color-scheme pinned light", /color-scheme: light/.test(css()));
+  // regression: fullscreen media is outside the root filter, so its own
+  // re-inversion was left uncancelled and it rendered as a colour negative
+  check("filter: fullscreen media drops its re-invert",
+    /video:fullscreen[^{]*\{[^}]*filter: none/.test(bare()));
+  check("filter: :fullscreen media reset is its own rule",
+    !/video:fullscreen[^{]*\{[^}]*invert/.test(bare()));
+  // a subframe sits inside the top frame's filtered output already
+  // regression: a self-theming cross-origin embed served its own dark theme and
+  // the top frame's filter turned it white
+  check("filter: color-scheme is pinned in subframes too",
+    /color-scheme: light/.test(window.__mm.buildFilterCss({ ...window.__mm.DEFAULTS }, false)));
+  check("filter: subframe gets no root filter", !/html \{/.test(window.__mm.buildFilterCss({ ...window.__mm.DEFAULTS }, false)),
+    norm(window.__mm.buildFilterCss({ ...window.__mm.DEFAULTS }, false)));
+  check("filter: subframe still re-inverts its own media",
+    /img, video, embed, object/.test(window.__mm.buildFilterCss({ ...window.__mm.DEFAULTS }, false)));
+  check("filter: sliders apply once, in the top frame only",
+    !window.__mm.buildFilterCss({ ...window.__mm.DEFAULTS, brightness: 70 }, false).includes("brightness"));
+  // regression: <picture> wrapper triple-inverted its <img> into a negative
+  check("filter: picture wrapper not in re-invert list", !/^img[^{]*picture/m.test(css()),
+    norm(css().split("\n").find((l) => l.startsWith("img")) || ""));
+  // regression: inline background-image inverted the whole subtree
+  check("filter: no [style*=background-image] rule", !css().includes("background-image"));
+
+  await set({ brightness: 100, contrast: 100 });
+  await tick();
+  check("filter: reset leaves only invert+hue-rotate",
+    norm(htmlFilter()) === "invert(1) hue-rotate(180deg)", htmlFilter());
+
+  // --- master toggle ---
+  await set({ enabled: false });
+  await tick();
+  check("disable: style removed", !styleEl());
+  check("disable: html filter cleared", htmlFilter() === "none", htmlFilter());
+  check("disable: page back to light", bodyBg() !== DARK, bodyBg());
+  check("disable: observer disconnected", window.__mm.observer === null);
+
+  // mutating the DOM while disabled must not resurrect the theme
+  document.head.appendChild(document.createElement("meta"));
+  await tick(80);
+  check("disable: DOM churn does not resurrect theme", !styleEl());
+
+  check("disable: shadow roots released", sh.adoptedStyleSheets.length === 0,
+    sh.adoptedStyleSheets.length + " sheets still adopted");
+
+  await set({ enabled: true, mode: "dynamic" });
+  await tick();
+  check("re-enable: style restored", !!styleEl());
+  check("re-enable: body dark again", bodyBg() === DARK, bodyBg());
+  check("re-enable: observer restarted", window.__mm.observer !== null);
+  check("re-enable: shadow roots re-adopted",
+    getComputedStyle(sh.getElementById("sInner")).backgroundColor === DARK,
+    getComputedStyle(sh.getElementById("sInner")).backgroundColor);
+  // regression: the observed-roots set was kept across the restart, so the new
+  // observer never watched roots the old one had, and anything attached inside
+  // them afterwards was never themed.
+  const lateNested = document.createElement("div");
+  sh.appendChild(lateNested);
+  const lateNestedRoot = lateNested.attachShadow({ mode: "open" });
+  lateNestedRoot.innerHTML = '<div id="deepLate">attached after re-enable</div>';
+  await tick(220);
+  check("re-enable: a root nested in a known root is still discovered",
+    getComputedStyle(lateNestedRoot.getElementById("deepLate")).backgroundColor === DARK,
+    getComputedStyle(lateNestedRoot.getElementById("deepLate")).backgroundColor);
+
+  // --- self-heal (SPA wiping <head>) ---
+  styleEl().remove();
+  check("self-heal: style gone immediately after removal", !styleEl());
+  await tick(120);
+  check("self-heal: MutationObserver re-injected the style", !!styleEl());
+  check("self-heal: page dark again", bodyBg() === DARK, bodyBg());
+
+  // --- per-site disable ---
+  const host = window.__mm.HOST;
+  await set({ disabledSites: [host] });
+  await tick();
+  check(`per-site: disabling "${host}" removes theme`, !styleEl());
+
+  // regression: popup stored "www.x" but content matched only exact/subdomain
+  await set({ disabledSites: ["www." + host] });
+  await tick();
+  check(`per-site: "www.${host}" also matches "${host}"`, !styleEl());
+
+  await set({ disabledSites: ["notlocalhost"] });
+  await tick();
+  check("per-site: unrelated entry does not disable", !!styleEl());
+
+  await set({ disabledSites: [] });
+  await tick();
+  check("per-site: clearing list restores theme", !!styleEl());
+
+  // --- host matching predicate, on the real function ---
+  const m = (h, list) => list.some((entry) => {
+    const d = entry.replace(/^www\./, "");
+    return h === d || h.endsWith("." + d);
+  });
+  check("match: exact host", m("example.com", ["example.com"]));
+  check("match: subdomain matches parent", m("news.example.com", ["example.com"]));
+  check("match: www-prefixed entry normalized", m("example.com", ["www.example.com"]));
+  check("match: lookalike suffix rejected", !m("notexample.com", ["example.com"]));
+  check("match: parent not disabled by child entry", !m("example.com", ["news.example.com"]));
+
+  // --- no blue anywhere in the palette ---
+  const B0 = window.__mm;
+  const dynCss = B0.buildDynamicCss({ ...B0.DEFAULTS });
+  const filCss = B0.buildFilterCss({ ...B0.DEFAULTS });
+  const dynOff = offPalette(dynCss);
+  const filOff = offPalette(filCss);
+  check("palette: dynamic engine uses only beUI tokens", dynOff.length === 0, dynOff.join(" "));
+  check("palette: filter engine uses only beUI tokens", filOff.length === 0, filOff.join(" "));
+  check("palette: surfaces are beUI background and card",
+    dynCss.includes(BEUI_TOKENS.background) && dynCss.includes(BEUI_TOKENS.card));
+  check("palette: links use the beUI accent", dynCss.includes(BEUI_TOKENS.accent));
+  check("palette: selection is accent on accent-foreground",
+    /::selection \{[^}]*background-color: oklch\(80% 0\.18 195\)[^}]*color: #151515/.test(dynCss));
+  // The popup ships the identical token set, so the two cannot drift.
+  const themeCss = await (await fetch("../popup/src/theme.css?t=" + performance.now(), { cache: "no-store" })).text();
+  const shared = ["#151515", "#1c1c1c", "oklch(96% 0 0)", "oklch(80% 0.18 195)", "#ffffff1a"];
+  const missing = shared.filter((v) => !themeCss.includes(v));
+  check("palette: popup theme declares the same beUI tokens", missing.length === 0, missing.join(" "));
+
+  // --- builders ---
+  const B = window.__mm;
+  check("builder: dynamic has no invert", !B.buildDynamicCss({ ...B.DEFAULTS }).includes("invert("));
+  check("builder: dynamic omits filter rule at defaults", !/html \{ filter:/.test(B.buildDynamicCss({ ...B.DEFAULTS })));
+  check("builder: filter contains invert", B.buildFilterCss({ ...B.DEFAULTS }).includes("invert(1)"));
+  check("builder: sepia+grayscale flow through",
+    B.cssFilterValue({ ...B.DEFAULTS, sepia: 40, grayscale: 20 }, false) === "sepia(40%) grayscale(20%)");
+}
+
+function $id(id) { return document.getElementById(id); }
+
+// ---------------------------------------------------------------------------
+(async () => {
+  try {
+    await loadContentScript();
+    if (MODE === "pending") await pendingSuite();
+    else await mainSuite();
+  } catch (e) {
+    check("harness ran without throwing", false, (e && e.message) + " " + (e && e.stack || "").split("\n")[1]);
+  }
+  check("no exception thrown from a storage.onChanged listener",
+    listenerErrors.length === 0, listenerErrors.join(" | "));
+  paint(true);
+})();
+</script>
+</body>
+</html>

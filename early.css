@@ -1,0 +1,6 @@
+/* Applied before first paint so pages do not flash white while content.js
+   waits on chrome.storage. Registered by the service worker only while dark
+   mode is on, and released the moment content.js has read the settings. */
+html:not([data-dark-night-ready]) {
+  background-color: #181a1b !important;
+}

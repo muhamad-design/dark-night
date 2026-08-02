@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Dark Night popup harness</title>
+  <style>
+    body { font: 13px/1.5 ui-monospace, Menlo, monospace; margin: 20px; background: #fdfdfb; color: #222; }
+    #out { white-space: pre; }
+    .pass { color: #1a7f37; }
+    .fail { color: #c00; font-weight: bold; }
+    #stage { float: right; border: 1px solid #ccc; width: 322px; height: 640px; background: #151515; }
+  </style>
+</head>
+<body>
+  <h1>Dark Night popup harness</h1>
+  <iframe id="stage" title="popup under test"></iframe>
+  <div id="out">running...</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Loads the BUILT popup (popup/dist) into an iframe with a mocked chrome API,
+// so the real React + beUI bundle is what gets asserted on. Run `npm run build`
+// first - a stale bundle is the one failure mode that makes this suite lie.
+// ---------------------------------------------------------------------------
+const results = [];
+function check(name, cond, detail) {
+  results.push({ name, pass: !!cond, detail: detail === undefined ? "" : String(detail) });
+  paint();
+}
+function paint(done) {
+  const failed = results.filter((r) => !r.pass).length;
+  document.getElementById("out").innerHTML =
+    results.map((r) =>
+      `<span class="${r.pass ? "pass" : "fail"}">${r.pass ? "PASS" : "FAIL"}</span>  ${r.name}${r.detail ? "  [" + r.detail + "]" : ""}`
+    ).join("\n") +
+    `\n\n${results.length - failed}/${results.length} passed` + (done ? "" : "  ... still running");
+}
+
+const tick = (ms = 40) => new Promise((r) => setTimeout(r, ms));
+
+// Chrome throttles timers in a backgrounded tab, and React renders async, so a
+// fixed delay is not a reliable way to wait. Poll the condition instead.
+async function waitFor(fn, ms = 5000) {
+  const t0 = performance.now();
+  while (performance.now() - t0 < ms) {
+    try { if (fn()) return true; } catch (e) { /* not mounted yet */ }
+    await tick(20);
+  }
+  return false;
+}
+
+let store, listeners, writes, failNextWrite, tabUrl, win;
+
+function makeChrome() {
+  return {
+    runtime: { id: "dark-night-popup-test", lastError: null },
+    storage: {
+      sync: {
+        get(defaults, cb) { setTimeout(() => cb({ ...defaults, ...store }), 0); },
+        set(patch, cb) {
+          writes++;
+          setTimeout(() => {
+            if (failNextWrite) {
+              failNextWrite = false;
+              win.chrome.runtime.lastError = { message: "QUOTA_BYTES_PER_ITEM quota exceeded" };
+              if (cb) cb();
+              win.chrome.runtime.lastError = null;
+              return;
+            }
+            const changes = {};
+            for (const [k, v] of Object.entries(patch)) {
+              changes[k] = { oldValue: store[k], newValue: v };
+              store[k] = v;
+            }
+            listeners.forEach((fn) => fn(changes, "sync"));
+            if (cb) cb();
+          }, 0);
+        }
+      },
+      onChanged: {
+        addListener(fn) { listeners.push(fn); },
+        removeListener(fn) { const i = listeners.indexOf(fn); if (i >= 0) listeners.splice(i, 1); }
+      }
+    },
+    tabs: { query(q, cb) { setTimeout(() => cb([{ id: 1, url: tabUrl }]), 0); } }
+  };
+}
+
+// Drives a storage change from "another window" - i.e. not through the popup.
+function externalSet(patch) {
+  const changes = {};
+  for (const [k, v] of Object.entries(patch)) {
+    changes[k] = { oldValue: store[k], newValue: v };
+    store[k] = v;
+  }
+  listeners.forEach((fn) => fn(changes, "sync"));
+}
+
+async function mount(initialStore, url) {
+  const html = await (await fetch("../popup/dist/index.html?t=" + performance.now(), { cache: "no-store" })).text();
+  const frame = document.getElementById("stage");
+  await new Promise((res) => { frame.onload = res; frame.src = "about:blank"; });
+  // Let any write still queued by the previous mount settle against the OLD
+  // store before swapping in a fresh one, or it lands in the next test's state.
+  await tick(300);
+  store = { ...initialStore };
+  listeners = [];
+  writes = 0;
+  failNextWrite = false;
+  tabUrl = url;
+
+  win = frame.contentWindow;
+  win.chrome = makeChrome();
+  const doc = frame.contentDocument;
+  doc.open();
+  // <base> so the bundle's relative asset URLs resolve. Vite content-hashes the
+  // filenames, so a rebuilt bundle can never be served from cache by mistake.
+  doc.write(html.replace("<head>", '<head><base href="../popup/dist/">'));
+  doc.close();
+  await waitFor(() => win.document.querySelector('[data-loaded="true"]'));
+  await tick(60);
+  return doc;
+}
+
+const $ = (sel) => win.document.querySelector(sel);
+const $$ = (sel) => [...win.document.querySelectorAll(sel)];
+const txt = (sel) => ($(sel) ? $(sel).textContent.trim() : "(missing)");
+const tab = (name) => $$('[role="tab"]').find((t) => t.textContent.trim() === name);
+const slider = (key) => $(`[data-slider="${key}"] [role="slider"]`);
+const key = (el, k) => el.dispatchEvent(new win.KeyboardEvent("keydown", { key: k, bubbles: true }));
+
+// ---------------------------------------------------------------------------
+async function run() {
+  const CLEAN = { enabled: true, mode: "dynamic", brightness: 100, contrast: 100,
+                  sepia: 0, grayscale: 0, disabledSites: [] };
+
+  // --- the bundle mounts and paints with the beUI theme ---------------------
+  await mount(CLEAN, "https://example.com/a");
+  check("popup: React bundle mounted", !!$('[data-loaded="true"]'));
+  check("theme: beUI background token applied",
+    win.getComputedStyle(win.document.body).backgroundColor === "rgb(21, 21, 21)",
+    win.getComputedStyle(win.document.body).backgroundColor);
+  check("theme: html carries the dark class", win.document.documentElement.classList.contains("dark"));
+  // Bundled, not linked: MV3 forbids remote resources, so a broken @font-face
+  // path would silently fall back to the system sans.
+  await waitFor(() => [...win.document.fonts].length >= 2);
+  const families = [...win.document.fonts].map((f) => f.family);
+  check("theme: Geist is bundled and loads", families.includes("Geist"), families.join(", "));
+  check("theme: Geist Mono is bundled and loads", families.includes("Geist Mono"), families.join(", "));
+  check("theme: body actually renders in Geist",
+    win.getComputedStyle(win.document.body).fontFamily.startsWith("Geist"),
+    win.getComputedStyle(win.document.body).fontFamily);
+  check("theme: tailwind utilities resolved (not raw class names)",
+    win.getComputedStyle($("header")).borderBottomWidth === "1px",
+    win.getComputedStyle($("header")).borderBottomWidth);
+
+  // --- opening the popup must not animate anything in ----------------------
+  // Sampled across consecutive frames: a value still moving means an entrance
+  // animation, which is the "jump" the UI must never do.
+  const settle = [];
+  for (let i = 0; i < 3; i++) {
+    settle.push(JSON.stringify({
+      hint: win.getComputedStyle($("#modeHint span")).opacity,
+      header: win.getComputedStyle($("header")).opacity,
+      site: win.getComputedStyle($("#siteToggle")).opacity
+    }));
+    await tick(30);
+  }
+  check("open: nothing animates in - the UI is final on the first frame",
+    settle.every((x) => x === settle[0]) && JSON.parse(settle[0]).hint === "1", settle.join(" -> "));
+  check("open: no skeleton once settings are loaded", !$("#skeleton"));
+
+  // --- the engine picker fills the width -----------------------------------
+  const listW = $('[role="tablist"]').getBoundingClientRect().width;
+  const tabW = $$('[role="tab"]').map((t) => t.getBoundingClientRect().width);
+  check("tabs: both triggers are equal width",
+    Math.abs(tabW[0] - tabW[1]) < 2, tabW.map(Math.round).join(" / "));
+  check("tabs: together they fill the row",
+    tabW[0] + tabW[1] > listW - 12, Math.round(tabW[0] + tabW[1]) + " of " + Math.round(listW));
+
+  // --- sliders show their steps --------------------------------------------
+  for (const k of ["brightness", "sepia"]) {
+    const ticks = $$(`[data-slider="${k}"] span.absolute`).length;
+    check(`sliders: ${k} draws step ticks`, ticks > 1, ticks + " ticks");
+  }
+  check("sliders: the step is coarse enough for beUI to draw ticks",
+    Number(slider("brightness").getAttribute("aria-valuenow")) % 10 === 0,
+    slider("brightness").getAttribute("aria-valuenow"));
+
+  // --- naming ---------------------------------------------------------------
+  check("brand: header reads Dark Night", txt("header").includes("Dark Night"), txt("header"));
+  check("brand: no MM left in the popup chrome", !txt("header").includes("MM"), txt("header"));
+
+  // --- beUI components are the real ones -----------------------------------
+  check("beUI: master control is a role=switch, not a checkbox", !!$('[role="switch"]'));
+  check("beUI: switch reflects stored state", $('[role="switch"]').getAttribute("aria-checked") === "true");
+  check("beUI: engine picker is a tablist", !!$('[role="tablist"]') && $$('[role="tab"]').length === 2);
+  check("beUI: sliders expose the slider role", $$('[role="slider"]').length === 4);
+  check("beUI: slider carries its value in aria",
+    slider("brightness").getAttribute("aria-valuenow") === "100",
+    slider("brightness").getAttribute("aria-valuenow"));
+
+  check("popup: current site shown", txt("#siteName") === "example.com", txt("#siteName"));
+  check("popup: offers to disable a clean site", txt("#siteToggle") === "Disable for this site", txt("#siteToggle"));
+  check("popup: mode hint explains the engine", txt("#modeHint").length > 20, txt("#modeHint"));
+  check("popup: empty exclusion list is described", txt("#excludedCount") === "No sites excluded", txt("#excludedCount"));
+
+  // --- per-site disable round trip -----------------------------------------
+  $("#siteToggle").click();
+  await waitFor(() => store.disabledSites.length === 1);
+  check("per-site: click excludes the host",
+    JSON.stringify(store.disabledSites) === '["example.com"]', JSON.stringify(store.disabledSites));
+  await waitFor(() => txt("#siteToggle") === "Enable for this site");
+  check("per-site: button flips to enable", txt("#siteToggle") === "Enable for this site", txt("#siteToggle"));
+  check("per-site: exclusion list count updates", txt("#excludedCount") === "1 site excluded", txt("#excludedCount"));
+
+  $("#siteToggle").click();
+  await waitFor(() => store.disabledSites.length === 0);
+  check("per-site: click again re-enables",
+    JSON.stringify(store.disabledSites) === "[]", JSON.stringify(store.disabledSites));
+
+  // --- regression: enabling a subdomain deleted the parent's exclusion -------
+  await mount({ ...CLEAN, disabledSites: ["example.com", "other.com"] }, "https://docs.example.com/x");
+  check("subdomain: parent exclusion is reported, not silently owned",
+    txt("#siteToggle") === "Enable example.com", txt("#siteToggle"));
+  check("subdomain: the reason is spelled out", txt("#siteNote").includes("example.com"), txt("#siteNote"));
+  $("#siteToggle").click();
+  await waitFor(() => !store.disabledSites.includes("example.com"));
+  check("subdomain: removing it takes only the parent entry, unrelated sites survive",
+    JSON.stringify(store.disabledSites) === '["other.com"]', JSON.stringify(store.disabledSites));
+
+  // --- regression: every arrow key press was its own storage write ----------
+  await mount(CLEAN, "https://example.com/");
+  const br = slider("brightness");
+  br.focus();
+  writes = 0;
+  // Fired synchronously: React batches, so every press reads the same rendered
+  // value and the control lands one step up. The point of the burst is the
+  // write count, not the arithmetic.
+  for (let i = 0; i < 20; i++) key(br, "ArrowRight");
+  check("sliders: a burst of key presses costs no immediate write", writes === 0, "writes=" + writes);
+  await waitFor(() => store.brightness !== 100);
+  check("sliders: the burst coalesces into exactly one write", writes === 1, "writes=" + writes);
+  check("sliders: the stored value matches the control",
+    String(store.brightness) === slider("brightness").getAttribute("aria-valuenow"),
+    "stored=" + store.brightness + " control=" + slider("brightness").getAttribute("aria-valuenow"));
+  check("sliders: the readout matches the control",
+    txt('[data-value="brightness"]') === store.brightness + "%", txt('[data-value="brightness"]'));
+
+  // --- regression: a rejected write left the UI asserting something false ----
+  failNextWrite = true;
+  $("#siteToggle").click();
+  await waitFor(() => txt("#status").length > 0);
+  await waitFor(() => txt("#siteToggle") === "Disable for this site");
+  check("failed write: UI falls back to stored truth",
+    txt("#siteToggle") === "Disable for this site", txt("#siteToggle"));
+  check("failed write: the user is told", txt("#status").length > 0, txt("#status"));
+  check("failed write: nothing was actually excluded",
+    JSON.stringify(store.disabledSites) === "[]", JSON.stringify(store.disabledSites));
+
+  // --- regression: popup showed a stale snapshot after Alt+Shift+D ----------
+  externalSet({ enabled: false });
+  await waitFor(() => $('[role="switch"]').getAttribute("aria-checked") === "false");
+  check("external change: switch follows storage",
+    $('[role="switch"]').getAttribute("aria-checked") === "false");
+  check("external change: controls are inert, not just dimmed",
+    $$("section").some((s) => s.hasAttribute("inert")));
+  externalSet({ enabled: true });
+  await waitFor(() => $('[role="switch"]').getAttribute("aria-checked") === "true");
+  check("external change: re-enabling restores the controls",
+    !$$("section").some((s) => s.hasAttribute("inert")));
+
+  externalSet({ mode: "filter" });
+  await waitFor(() => tab("Filter").getAttribute("aria-selected") === "true");
+  check("external change: engine tabs follow storage",
+    tab("Filter").getAttribute("aria-selected") === "true" &&
+    tab("Dynamic").getAttribute("aria-selected") === "false");
+
+  // --- engine switch writes through ----------------------------------------
+  tab("Dynamic").click();
+  await waitFor(() => store.mode === "dynamic");
+  check("engine: picking a tab stores the mode", store.mode === "dynamic", store.mode);
+  // regression: the hint sat inside AnimatePresence mode="wait", so it kept
+  // describing the engine you had just left until an exit animation finished.
+  check("engine: hint follows the selection immediately",
+    txt("#modeHint").includes("Repaints"), txt("#modeHint"));
+  tab("Filter").click();
+  await waitFor(() => store.mode === "filter");
+  check("engine: hint is never stale after a swap",
+    txt("#modeHint").includes("Inverts"), txt("#modeHint"));
+
+  // --- managing the exclusion list without visiting the site ----------------
+  await mount({ ...CLEAN, disabledSites: ["a.com", "b.com", "c.com"] }, "https://example.com/");
+  check("list: every excluded site is listed", $$("[data-remove]").length === 3, $$("[data-remove]").length);
+  check("list: count is pluralised", txt("#excludedCount") === "3 sites excluded", txt("#excludedCount"));
+  check("list: site names are readable at 14px",
+    parseFloat(win.getComputedStyle($("#excludedList span")).fontSize) >= 14,
+    win.getComputedStyle($("#excludedList span")).fontSize);
+  const xr = $("[data-remove]").getBoundingClientRect();
+  check("list: the remove button is a comfortable hit target",
+    xr.width >= 28 && xr.height >= 28, Math.round(xr.width) + "x" + Math.round(xr.height));
+  // regression: rows animated in from height 0, so a stalled frame loop (reduced
+  // motion, a backgrounded window) left the list half-height and half-transparent.
+  $("#excludedToggle").click();
+  await waitFor(() => $("details").open);
+  const rows = $$("#excludedList li");
+  check("list: rows are readable without waiting on an animation",
+    rows.every((li) => win.getComputedStyle(li).opacity === "1" && parseFloat(win.getComputedStyle(li).height) > 14),
+    rows.map((li) => win.getComputedStyle(li).height + "@" + win.getComputedStyle(li).opacity).join(" "));
+  $('[data-remove="b.com"]').click();
+  await waitFor(() => store.disabledSites.length === 2);
+  check("list: removing one entry leaves the rest",
+    JSON.stringify(store.disabledSites) === '["a.com","c.com"]', JSON.stringify(store.disabledSites));
+  await tick(120);
+  check("list: focus survives the removal for keyboard users",
+    win.document.activeElement && win.document.activeElement.hasAttribute("data-remove"),
+    win.document.activeElement && win.document.activeElement.tagName);
+
+  // --- corrupt / out-of-range settings from an older or newer version -------
+  await mount({ enabled: true, mode: "nonsense", brightness: 9999, contrast: -40, sepia: "x",
+                grayscale: 0, disabledSites: "not-an-array" }, "https://example.com/");
+  check("sanitize: unknown mode falls back to dynamic",
+    tab("Dynamic").getAttribute("aria-selected") === "true");
+  check("sanitize: out-of-range slider clamped to max",
+    slider("brightness").getAttribute("aria-valuenow") === "150",
+    slider("brightness").getAttribute("aria-valuenow"));
+  check("sanitize: out-of-range slider clamped to min",
+    slider("contrast").getAttribute("aria-valuenow") === "50",
+    slider("contrast").getAttribute("aria-valuenow"));
+  check("sanitize: non-numeric slider falls back to default",
+    slider("sepia").getAttribute("aria-valuenow") === "0",
+    slider("sepia").getAttribute("aria-valuenow"));
+  check("sanitize: non-array exclusion list does not crash the popup",
+    txt("#excludedCount") === "No sites excluded", txt("#excludedCount"));
+
+  // --- pages Chrome will not let us theme -----------------------------------
+  await mount(CLEAN, "chrome://extensions");
+  check("restricted: site name explains the situation",
+    txt("#siteName") === "Not available on this page", txt("#siteName"));
+  check("restricted: the toggle is disabled", $("#siteToggle").disabled === true);
+  check("restricted: and says why", txt("#siteNote").length > 0, txt("#siteNote"));
+
+  // --- accessibility --------------------------------------------------------
+  check("a11y: master switch has an accessible name",
+    !!$('[role="switch"]').getAttribute("aria-label"), $('[role="switch"]').getAttribute("aria-label"));
+  check("a11y: tabs expose selected state", tab("Dynamic").hasAttribute("aria-selected"));
+  check("a11y: sliders are keyboard reachable", slider("brightness").getAttribute("tabindex") === "0",
+    slider("brightness").getAttribute("tabindex"));
+  check("a11y: document has a title and language",
+    win.document.title.length > 0 && win.document.documentElement.lang === "en");
+}
+
+(async () => {
+  try { await run(); }
+  catch (e) { check("harness ran without throwing", false, (e && e.message) + " " + ((e && e.stack || "").split("\n")[1] || "")); }
+  paint(true);
+})();
+</script>
+</body>
+</html>

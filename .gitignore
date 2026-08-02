@@ -1,0 +1,7 @@
+# This folder sits inside an Obsidian vault that auto-commits, so build output
+# and dependencies must be excluded before anything is installed.
+node_modules/
+popup/dist/
+.vite/
+*.tsbuildinfo
+.DS_Store
