@@ -14,7 +14,11 @@ import {
   STEPS,
   bare,
   blockingEntry,
+  pickTheme,
+  siteTheme,
   type Mode,
+  type Settings,
+  type SiteTheme,
   type SliderKey
 } from "@/lib/settings";
 import { useSettings } from "@/lib/use-settings";
@@ -25,6 +29,8 @@ const SLIDER_LABEL: Record<SliderKey, string> = {
   sepia: "Sepia",
   grayscale: "Grayscale"
 };
+
+type Scope = "global" | "site";
 
 // Shown only if the settings read is slow enough to notice. Rendering the UI
 // with default values first and snapping to the real ones is the jump we are
@@ -48,6 +54,11 @@ export default function App() {
   const summaryRef = useRef<HTMLElement>(null);
   const focusAfterRemove = useRef<number | null>(null);
   const [slowLoad, setSlowLoad] = useState(false);
+  // Which set of visual settings the controls below are editing. Null means
+  // "not chosen yet", so the popup opens on whichever set actually paints this
+  // site - a site with its own theme opens showing that theme, not the shared
+  // one it is not using.
+  const [scopePick, setScopePick] = useState<Scope | null>(null);
 
   // A storage read normally resolves in a few milliseconds. Flashing a skeleton
   // for that long is worse than showing nothing, so it only appears if the read
@@ -67,6 +78,44 @@ export default function App() {
   const steppedAside =
     nativeDark && settings.autoSkipNativeDark && !forcedEntry && !entry && settings.enabled;
   const forcedOverDark = nativeDark && !!forcedEntry && !entry && settings.enabled;
+
+  const override = siteTheme(host, settings.siteOverrides);
+  // Without a host there is nothing to scope to - a chrome:// page has no site
+  // to save anything against - so the scope collapses to the shared settings.
+  const scope: Scope = host ? (scopePick ?? (override ? "site" : "global")) : "global";
+  // What the controls show. In site scope before anything has been saved there
+  // is no override yet, so the shared values are on screen and the first edit
+  // is what snapshots them into one.
+  const view: Settings = scope === "site" && override ? { ...settings, ...override } : settings;
+
+  // Writes a visual setting to whichever set the scope points at. Creating a
+  // site's theme snapshots every one of its values, not just the edited one:
+  // a half-filled override would silently follow later changes to the shared
+  // settings for the keys it happens not to hold, which is not what "only for
+  // this site" means.
+  function setTheme(patch: Partial<SiteTheme>, opts?: { defer?: boolean }) {
+    if (scope === "site" && host) {
+      const base = override ?? pickTheme(settings);
+      save({ siteOverrides: { ...settings.siteOverrides, [host]: { ...base, ...patch } } }, opts);
+    } else {
+      save(patch, opts);
+    }
+  }
+
+  function resetTheme() {
+    if (scope === "site" && host) {
+      const next = { ...settings.siteOverrides };
+      delete next[host];
+      save({ siteOverrides: next });
+      // Back to deriving the scope, so the popup drops to the shared settings
+      // rather than sitting in a scope with nothing in it.
+      setScopePick(null);
+      setStatus(`Cleared ${host} - back to the shared settings`);
+      return;
+    }
+    save({ brightness: 100, contrast: 100, sepia: 0, grayscale: 0 });
+    setStatus("Sliders reset");
+  }
 
   function forceSite() {
     if (!host) return;
@@ -208,11 +257,38 @@ export default function App() {
         )}
       </section>
 
+      {/* Scope ----------------------------------------------------------- */}
+      {/* Only where there is a site to scope to. On a chrome:// page the picker
+          would offer a choice with one real option. */}
+      {host && (
+        <section id="scopeRow" className="border-b border-border px-4 py-3" inert={off ? true : undefined}>
+          <Tabs value={scope} onValueChange={(v) => setScopePick(v as Scope)} variant="segment">
+            <TabsList className="flex w-full [&>div]:flex-1 [&>div]:basis-0">
+              <TabsTrigger value="global" className="w-full">
+                All sites
+              </TabsTrigger>
+              <TabsTrigger value="site" className="w-full">
+                This site
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+          <p id="scopeHint" className="mt-2 text-[11px] leading-snug text-muted-foreground">
+            <span key={scope} className="block">
+              {scope === "site"
+                ? `Engine, sliders and images for ${host} only.`
+                : override
+                  ? `${host} has its own settings - switch to This site to edit them.`
+                  : "Engine, sliders and images for every site without its own."}
+            </span>
+          </p>
+        </section>
+      )}
+
       {/* Engine --------------------------------------------------------- */}
-      <section className="border-b border-border px-4 py-3" inert={off ? true : undefined}>
+      <section id="engineRow" className="border-b border-border px-4 py-3" inert={off ? true : undefined}>
         <Tabs
-          value={settings.mode}
-          onValueChange={(v) => save({ mode: v as Mode })}
+          value={view.mode}
+          onValueChange={(v) => setTheme({ mode: v as Mode })}
           variant="segment"
         >
           {/* TabsTrigger wraps its button in a positioning div, so the flex
@@ -230,8 +306,8 @@ export default function App() {
         {/* Keyed so the text swaps immediately on a mode change, and with no
             entrance animation so opening the popup never fades anything in. */}
         <p id="modeHint" className="mt-2 text-[11px] leading-snug text-muted-foreground">
-          <span key={settings.mode} className="block">
-            {MODE_HINT[settings.mode]}
+          <span key={view.mode} className="block">
+            {MODE_HINT[view.mode]}
           </span>
         </p>
       </section>
@@ -243,21 +319,44 @@ export default function App() {
             <div className="mb-1 flex items-baseline justify-between">
               <span className="text-xs text-foreground">{SLIDER_LABEL[key]}</span>
               <span data-value={key} className="font-mono text-xs tabular-nums text-muted-foreground">
-                {settings[key]}%
+                {view[key]}%
               </span>
             </div>
             <RangeSlider
-              value={settings[key]}
+              value={view[key]}
               min={RANGES[key][0]}
               max={RANGES[key][1]}
               step={STEPS[key]}
               showTicks
-              onValueChange={(v) => save({ [key]: v }, { defer: true })}
+              onValueChange={(v) => setTheme({ [key]: v }, { defer: true })}
               formatValueText={(v) => `${SLIDER_LABEL[key]} ${v}%`}
             />
           </div>
         ))}
+        <div id="themeImagesRow" className="flex items-center justify-between gap-3">
+          <span className="text-xs text-foreground">Theme images and video</span>
+          <Checkbox
+            checked={view.themeImages}
+            onCheckedChange={(next) => setTheme({ themeImages: next })}
+            aria-label="Theme images and video"
+          />
+        </div>
       </section>
+
+      <footer className="flex items-center justify-between px-4 pb-3" inert={off ? true : undefined}>
+        <Button
+          id="reset"
+          variant="ghost"
+          size="sm"
+          disabled={scope === "site" && !override}
+          onClick={resetTheme}
+        >
+          {scope === "site" ? "Clear site settings" : "Reset sliders"}
+        </Button>
+        <kbd className="rounded-md border border-border bg-card px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+          Alt+Shift+D
+        </kbd>
+      </footer>
 
       {/* Auto-skip ------------------------------------------------------- */}
       <section
@@ -272,23 +371,6 @@ export default function App() {
           aria-label="Skip sites that are already dark"
         />
       </section>
-
-      <footer className="flex items-center justify-between px-4 pb-3" inert={off ? true : undefined}>
-        <Button
-          id="reset"
-          variant="ghost"
-          size="sm"
-          onClick={() => {
-            save({ brightness: 100, contrast: 100, sepia: 0, grayscale: 0 });
-            setStatus("Sliders reset");
-          }}
-        >
-          Reset sliders
-        </Button>
-        <kbd className="rounded-md border border-border bg-card px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-          Alt+Shift+D
-        </kbd>
-      </footer>
 
       {/* Excluded sites -------------------------------------------------- */}
       <section className="border-t border-border">

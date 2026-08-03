@@ -28,9 +28,11 @@
     contrast: 100, // 50..150
     sepia: 0, // 0..100
     grayscale: 0, // 0..100
+    themeImages: false, // let the theme reach photos and video too
     disabledSites: [],
     autoSkipNativeDark: true, // step aside when the page is already dark
-    forcedSites: [] // theme these even when they already look dark
+    forcedSites: [], // theme these even when they already look dark
+    siteOverrides: {} // host -> its own copy of the six visual settings
   };
 
   let settings = null;
@@ -79,6 +81,20 @@
     return hostInList(s.forcedSites);
   }
 
+  // The theme this host is painted with. A site can keep its own copy of the
+  // six visual settings; everything else - the master switch, the exclusion
+  // list, auto-skip - stays shared, because those decide *whether* to theme and
+  // already have per-site answers of their own.
+  //
+  // Matched on the exact host, unlike the exclusion list, which matches
+  // suffixes: excluding a domain is meant to cover everything under it, whereas
+  // a tuning is a response to one site's design. HOST is the top frame's, so
+  // every frame on a page is painted with the same theme.
+  function effective(s) {
+    const own = s.siteOverrides ? s.siteOverrides[HOST] : null;
+    return own && typeof own === "object" ? { ...s, ...own } : s;
+  }
+
   function cssFilterValue(s, withInvert) {
     const parts = [];
     if (withInvert) parts.push("invert(1)", "hue-rotate(180deg)");
@@ -86,6 +102,46 @@
     if (s.contrast !== 100) parts.push(`contrast(${s.contrast}%)`);
     if (s.sepia !== 0) parts.push(`sepia(${s.sepia}%)`);
     if (s.grayscale !== 0) parts.push(`grayscale(${s.grayscale}%)`);
+    return parts.join(" ");
+  }
+
+  // The reverse of the slider chain, for media that has to stay true to colour.
+  // An element's own filter is applied before any ancestor's, so media carrying
+  // the reverse of what <html> carries comes out of the pair unchanged - which
+  // is the only way to exempt anything from an ancestor filter in CSS.
+  //
+  // Reversing a chain reverses its order as well as each function, and
+  // brightness and contrast do not commute, so the order here is not cosmetic:
+  //   brightness(b) -> brightness(1/b)
+  //   contrast(c)   -> contrast(1/c)
+  //   grayscale(g)  -> saturate(1/(1-g)), exact because the spec defines
+  //                    grayscale(g) as saturate(1-g) - the same matrix.
+  //
+  // sepia() is the one that cannot be reversed: its matrix is not expressible
+  // as any other CSS filter function, and at 100% it is singular anyway. A
+  // sepia tint therefore still reaches media, which is the right answer for the
+  // one slider that is a deliberate warm cast over the whole page rather than a
+  // correction applied per surface.
+  //
+  // Dropping a term from the middle of the chain costs a little more than that
+  // term: the reversal telescopes only while it stays paired, so with sepia in
+  // play the two saturates sit either side of a matrix they do not commute with
+  // and grayscale stops cancelling exactly either. Brightness and contrast are
+  // adjacent to the dropped term on one side only and still cancel exactly, and
+  // at the default sepia of 0 every term cancels exactly.
+  function undoFilterValue(s) {
+    // Six decimals, because the reciprocals are rarely exact: 100/130 rounded
+    // to four left a drift of 3e-7 per channel, and while that is three orders
+    // below one 8-bit step, the digits are free and the headroom means the
+    // exactness test measures the arithmetic rather than the rounding.
+    const pct = (n) => `${Math.round(n * 1e6) / 1e6}%`;
+    const parts = [];
+    // At 100% the colour is gone; no amount of saturate brings it back.
+    if (s.grayscale !== 0 && s.grayscale < 100) {
+      parts.push(`saturate(${pct(10000 / (100 - s.grayscale))})`);
+    }
+    if (s.contrast !== 100) parts.push(`contrast(${pct(10000 / s.contrast)})`);
+    if (s.brightness !== 100) parts.push(`brightness(${pct(10000 / s.brightness)})`);
     return parts.join(" ");
   }
 
@@ -111,6 +167,12 @@
   // re-inverting it left those apps painted white on an otherwise dark page,
   // which is the exact complaint this engine exists to fix. Photographic
   // canvases now render inverted; that is the accepted trade.
+  //
+  // All of that is what happens while media is being kept true to colour, which
+  // is the default. With "theme images" on, media is simply left to the root
+  // filter like every other pixel: an inverted screenshot or diagram is exactly
+  // what that setting is for, and an inverted photograph is the reason it is
+  // off until asked for.
   function buildFilterCss(s, isTop = IS_TOP) {
     const invert = cssFilterValue(s, true);
     const root = isTop
@@ -142,6 +204,23 @@ html {
   filter: ${invert} !important;
 }`
       : "";
+    // The root filter has already inverted and adjusted every pixel of the
+    // frame by the time it reaches media, so undoing it here is what keeps a
+    // photo looking like the photo. Dropped entirely when the theme is meant to
+    // reach media, which leaves it carrying the root filter like anything else.
+    const undo = s.themeImages ? "" : `${undoFilterValue(s)} invert(1) hue-rotate(180deg)`.trim();
+    const media = undo
+      ? `
+img, video, embed, object {
+  filter: ${undo} !important;
+}`
+      : "";
+    // A fullscreen element is in the top layer, outside the <html> subtree, so
+    // the root filter never reaches it. Media true to colour therefore needs
+    // nothing at all there - carrying the reverse alone would render it as a
+    // colour negative - and themed media needs the whole treatment applied
+    // directly, since nothing above it will.
+    const fullscreenMedia = s.themeImages ? cssFilterValue(s, true) : "none";
     // Emitted in every frame, not just the top one: a self-theming cross-origin
     // embed would otherwise serve its own dark theme and get inverted white.
     return `
@@ -150,16 +229,11 @@ html {
      theme, which this engine then inverts into a blinding white page. Pinning
      light gives the filter the light source it is built to invert. */
   color-scheme: light !important;
-}${root}
-img, video, embed, object {
-  filter: invert(1) hue-rotate(180deg) !important;
-}
-/* A fullscreen element is in the top layer, outside the <html> subtree, so the
-   root filter never reaches it. Media there would be left with only its own
-   re-inversion and render as a colour negative. Its own rule, so an older
-   parser rejecting :fullscreen cannot take the media rule above down with it. */
+}${root}${media}
+/* Its own rule, so an older parser rejecting :fullscreen cannot take the media
+   rule above down with it. */
 img:fullscreen, video:fullscreen, canvas:fullscreen, embed:fullscreen, object:fullscreen {
-  filter: none !important;
+  filter: ${fullscreenMedia} !important;
 }
 `;
   }
@@ -201,6 +275,25 @@ img:fullscreen, video:fullscreen, canvas:fullscreen, embed:fullscreen, object:fu
   function buildDynamicCss(s) {
     const extra = cssFilterValue(s, false);
     const filterRule = extra ? `html${SP} { filter: ${extra} !important; }` : "";
+    // This engine never inverts, so the only thing that reaches media is the
+    // slider filter on <html> - which is exactly what washed a photograph out
+    // at brightness 130 / contrast 80. Media carries the reverse unless the
+    // theme is meant to reach it. At default slider values there is nothing to
+    // undo, so no rule is emitted and no image pays for a filter it does not
+    // need.
+    const undo = s.themeImages ? "" : undoFilterValue(s);
+    const mediaRule = undo
+      ? `
+img${SP}, video${SP}, embed${SP}, object${SP} {
+  filter: ${undo} !important;
+}
+/* Fullscreen media is in the top layer, outside the <html> subtree, so the
+   slider filter never reaches it - and reversing a filter that was never
+   applied is what would break it. */
+img:fullscreen, video:fullscreen, embed:fullscreen, object:fullscreen {
+  filter: none !important;
+}`
+      : "";
     return `
 :root {
   color-scheme: dark !important;
@@ -313,7 +406,7 @@ hr${SP}, table${SP}, thead${SP}, tbody${SP}, tfoot${SP}, tr${SP}, th${SP}, td${S
 html {
   scrollbar-color: ${T.scrollThumb} ${T.card};
 }
-${filterRule}
+${filterRule}${mediaRule}
 `;
   }
 
@@ -609,6 +702,16 @@ ${filterRule}
 
   function checkNativeDark() {
     if (!IS_TOP || !settings || !document.body) return;
+    // rememberVerdict below is a chrome.* call, and those throw outright once
+    // the extension is reloaded, disabled or updated. The dead-check poll never
+    // gets here first: the rechecks that reach this run 1s and 3s in, against a
+    // 5s poll. On a page the engine stepped aside from there is no poll at all -
+    // nothing is injected there, so applyTheme stops it, while these timers keep
+    // running - which is why the frame has to reclaim itself from this path too.
+    if (!alive()) {
+      teardown();
+      return;
+    }
     // Measured only while the result could matter; when the extension or the
     // site is off, or auto-skip is off, the verdict is simply "not stepping
     // aside" and the page is never touched for it.
@@ -708,10 +811,13 @@ ${filterRule}
       // documentElement exists at document_start even before <head>.
       (document.head || document.documentElement).appendChild(style);
     }
-    const css = buildCss(settings);
+    // Whether to theme is answered above from the shared settings; how to paint
+    // is answered here, from this site's own theme if it has one.
+    const view = effective(settings);
+    const css = buildCss(view);
     if (style.textContent !== css) style.textContent = css;
 
-    if (settings.mode === "filter") stopShadow();
+    if (view.mode === "filter") stopShadow();
     else startShadow(css);
 
     startWatching();

@@ -186,13 +186,18 @@ async function run() {
     settle.every((x) => x === settle[0]) && JSON.parse(settle[0]).hint === "1", settle.join(" -> "));
   check("open: no skeleton once settings are loaded", !$("#skeleton"));
 
-  // --- the engine picker fills the width -----------------------------------
-  const listW = $('[role="tablist"]').getBoundingClientRect().width;
-  const tabW = $$('[role="tab"]').map((t) => t.getBoundingClientRect().width);
-  check("tabs: both triggers are equal width",
-    Math.abs(tabW[0] - tabW[1]) < 2, tabW.map(Math.round).join(" / "));
-  check("tabs: together they fill the row",
-    tabW[0] + tabW[1] > listW - 12, Math.round(tabW[0] + tabW[1]) + " of " + Math.round(listW));
+  // --- the segmented pickers fill the width ---------------------------------
+  // Both of them: the scope picker and the engine picker are the same control
+  // with different labels, and a layout that only holds for one of them is a
+  // layout that holds by accident.
+  for (const row of ["#scopeRow", "#engineRow"]) {
+    const listW = $(`${row} [role="tablist"]`).getBoundingClientRect().width;
+    const tabW = $$(`${row} [role="tab"]`).map((t) => t.getBoundingClientRect().width);
+    check(`tabs: ${row} triggers are equal width`,
+      Math.abs(tabW[0] - tabW[1]) < 2, tabW.map(Math.round).join(" / "));
+    check(`tabs: ${row} triggers fill the row`,
+      tabW[0] + tabW[1] > listW - 12, Math.round(tabW[0] + tabW[1]) + " of " + Math.round(listW));
+  }
 
   // --- sliders show their steps --------------------------------------------
   for (const k of ["brightness", "sepia"]) {
@@ -210,7 +215,12 @@ async function run() {
   // --- UI components are the real ones -----------------------------------
   check("ui: master control is a role=switch, not a checkbox", !!$('[role="switch"]'));
   check("ui: switch reflects stored state", $('[role="switch"]').getAttribute("aria-checked") === "true");
-  check("ui: engine picker is a tablist", !!$('[role="tablist"]') && $$('[role="tab"]').length === 2);
+  check("ui: engine picker is a tablist",
+    !!$('#engineRow [role="tablist"]') && $$('#engineRow [role="tab"]').length === 2,
+    $$('#engineRow [role="tab"]').length);
+  check("ui: scope picker is a tablist of its own",
+    !!$('#scopeRow [role="tablist"]') && $$('#scopeRow [role="tab"]').length === 2,
+    $$('#scopeRow [role="tab"]').length);
   check("ui: sliders expose the slider role", $$('[role="slider"]').length === 4);
   check("ui: slider carries its value in aria",
     slider("brightness").getAttribute("aria-valuenow") === "100",
@@ -304,6 +314,113 @@ async function run() {
   await waitFor(() => store.mode === "filter");
   check("engine: hint is never stale after a swap",
     txt("#modeHint").includes("Inverts"), txt("#modeHint"));
+
+  // --- a site's own settings -------------------------------------------------
+  // The point of the scope picker is that it is unambiguous which set of values
+  // an edit lands in. Every assertion here is about that: what moved, and - just
+  // as much - what did not.
+  await mount(CLEAN, "https://mail.google.com/");
+  check("scope: opens on the shared settings when the site has none of its own",
+    tab("All sites").getAttribute("aria-selected") === "true");
+  check("scope: the reset button offers the shared reset",
+    txt("#reset") === "Reset sliders", txt("#reset"));
+
+  tab("This site").click();
+  await waitFor(() => tab("This site").getAttribute("aria-selected") === "true");
+  check("scope: the hint names the site it would save against",
+    txt("#scopeHint").includes("mail.google.com"), txt("#scopeHint"));
+  // Nothing is saved yet, so there is nothing to clear - and a button that
+  // looks live but does nothing is worse than one that says it cannot.
+  check("scope: nothing to clear before anything is saved", $("#reset").disabled === true);
+
+  tab("Filter").click();
+  await waitFor(() => !!(store.siteOverrides && store.siteOverrides["mail.google.com"]));
+  const own = store.siteOverrides["mail.google.com"];
+  check("scope: editing in site scope writes an override", own.mode === "filter", JSON.stringify(own));
+  check("scope: the shared engine is untouched", store.mode === "dynamic", store.mode);
+  // A half-filled override would silently follow later changes to the shared
+  // settings for whichever keys it happened not to hold.
+  check("scope: the override snapshots every visual value, not just the edited one",
+    ["mode", "brightness", "contrast", "sepia", "grayscale", "themeImages"]
+      .every((k) => k in own), JSON.stringify(own));
+  check("scope: reset now offers to clear the site", txt("#reset") === "Clear site settings", txt("#reset"));
+
+  const brSite = slider("brightness");
+  brSite.focus();
+  for (let i = 0; i < 3; i++) key(brSite, "ArrowRight");
+  await waitFor(() => store.siteOverrides["mail.google.com"].brightness !== 100);
+  check("scope: sliders write into the override too",
+    store.siteOverrides["mail.google.com"].brightness > 100,
+    store.siteOverrides["mail.google.com"].brightness);
+  check("scope: the shared brightness never moved", store.brightness === 100, store.brightness);
+
+  $("#reset").click();
+  await waitFor(() => !store.siteOverrides["mail.google.com"]);
+  check("scope: clearing removes the site's entry",
+    JSON.stringify(store.siteOverrides) === "{}", JSON.stringify(store.siteOverrides));
+  await waitFor(() => tab("All sites").getAttribute("aria-selected") === "true");
+  check("scope: clearing drops back to the shared settings rather than an empty scope",
+    tab("All sites").getAttribute("aria-selected") === "true");
+  check("scope: the shared values are what is on screen again",
+    slider("brightness").getAttribute("aria-valuenow") === "100",
+    slider("brightness").getAttribute("aria-valuenow"));
+
+  // A site that already has its own settings must open showing them - the popup
+  // would otherwise display a set of values the page in front of you is not using.
+  await mount({ ...CLEAN, siteOverrides: { "mail.google.com": {
+    mode: "filter", brightness: 130, contrast: 80, sepia: 0, grayscale: 0, themeImages: true } } },
+    "https://mail.google.com/");
+  check("scope: a site with its own settings opens in its own scope",
+    tab("This site").getAttribute("aria-selected") === "true");
+  check("scope: and shows them, not the shared ones",
+    slider("brightness").getAttribute("aria-valuenow") === "130" &&
+    tab("Filter").getAttribute("aria-selected") === "true",
+    slider("brightness").getAttribute("aria-valuenow"));
+  tab("All sites").click();
+  await waitFor(() => slider("brightness").getAttribute("aria-valuenow") === "100");
+  check("scope: switching back shows the shared values",
+    slider("brightness").getAttribute("aria-valuenow") === "100" &&
+    tab("Dynamic").getAttribute("aria-selected") === "true");
+  check("scope: and says the site is still keeping its own",
+    txt("#scopeHint").includes("mail.google.com"), txt("#scopeHint"));
+
+  // Another site must not pick up this one's theme - the match is the exact
+  // host, unlike the exclusion list, which matches suffixes on purpose.
+  await mount({ ...CLEAN, siteOverrides: { "example.com": { mode: "filter", brightness: 130,
+    contrast: 80, sepia: 0, grayscale: 0, themeImages: false } } }, "https://docs.example.com/");
+  check("scope: a subdomain does not inherit the parent's theme",
+    tab("All sites").getAttribute("aria-selected") === "true" &&
+    slider("brightness").getAttribute("aria-valuenow") === "100");
+
+  // There is no site to scope to on a chrome:// page, so the picker would be
+  // offering a choice with one real option.
+  await mount(CLEAN, "chrome://extensions");
+  check("scope: no picker where there is no site", !$("#scopeRow"));
+
+  // --- images stay true to colour unless asked otherwise ---------------------
+  await mount(CLEAN, "https://example.com/");
+  const imgBox = $('#themeImagesRow [role="checkbox"]');
+  check("images: the control is present with a name",
+    !!imgBox && !!imgBox.getAttribute("aria-label"), imgBox && imgBox.getAttribute("aria-label"));
+  check("images: off by default - a themed photograph is the more visible mistake",
+    imgBox.getAttribute("aria-checked") === "false");
+  imgBox.click();
+  await waitFor(() => store.themeImages === true);
+  check("images: opting in writes the shared setting", store.themeImages === true);
+  imgBox.click();
+  await waitFor(() => store.themeImages === false);
+  check("images: and opting back out writes it too", store.themeImages === false);
+
+  // It is one of the values a site can keep its own copy of, so it has to route
+  // through the scope like the sliders and the engine do.
+  tab("This site").click();
+  await waitFor(() => tab("This site").getAttribute("aria-selected") === "true");
+  $('#themeImagesRow [role="checkbox"]').click();
+  await waitFor(() => !!(store.siteOverrides && store.siteOverrides["example.com"]));
+  check("images: in site scope it lands in the override",
+    store.siteOverrides["example.com"].themeImages === true,
+    JSON.stringify(store.siteOverrides));
+  check("images: and leaves the shared setting alone", store.themeImages === false, store.themeImages);
 
   // --- managing the exclusion list without visiting the site ----------------
   await mount({ ...CLEAN, disabledSites: ["a.com", "b.com", "c.com"] }, "https://example.com/");

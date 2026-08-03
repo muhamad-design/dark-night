@@ -79,16 +79,27 @@ const listenerErrors = [];
 let heldGet = null;
 let localWrites = 0;
 
+// Reloading, disabling or updating an extension does not merely stop delivering
+// callbacks to the frames still running its content script: runtime.id goes
+// away and every chrome.* call throws synchronously from then on. Modelled, or
+// a suite about the invalidated frame would pass against code that crashes on a
+// real reload.
+function bridge() {
+  if (!chrome.runtime.id) throw new Error("Extension context invalidated.");
+}
+
 window.chrome = {
   runtime: { id: "dark-night-test", lastError: null },
   storage: {
     sync: {
       get(defaults, cb) {
+        bridge();
         const snapshot = { ...defaults, ...store };
         if (HOLD_SYNC) heldGet = () => cb(snapshot);   // harness controls delivery
         else setTimeout(() => cb(snapshot), 0);
       },
       set(patch, cb) {
+        bridge();
         const changes = {};
         for (const [k, v] of Object.entries(patch)) {
           changes[k] = { oldValue: store[k], newValue: v };
@@ -112,10 +123,12 @@ window.chrome = {
     // store here too, and never fires the sync change listeners.
     local: {
       get(defaults, cb) {
+        bridge();
         const snapshot = { ...defaults, ...localStore };
         setTimeout(() => cb(snapshot), 0);
       },
       set(patch, cb) {
+        bridge();
         localWrites++;
         setTimeout(() => {
           Object.assign(localStore, patch);
@@ -241,7 +254,9 @@ async function loadContentScript() {
   new Function(src.replace(marker,
     `  window.__mm = {
        buildCss, buildDynamicCss, buildFilterCss, cssFilterValue,
+       undoFilterValue, effective,
        siteDisabled, HOST, DEFAULTS, READY_ATTR, SP, colorIsDark,
+       checkNativeDark, detectTimers,
        get settings() { return settings; },
        get observer() { return observer; },
        get deadCheck() { return deadCheck; },
@@ -741,8 +756,14 @@ async function mainSuite() {
     norm(window.__mm.buildFilterCss({ ...window.__mm.DEFAULTS }, false)));
   check("filter: subframe still re-inverts its own media",
     /img, video, embed, object/.test(window.__mm.buildFilterCss({ ...window.__mm.DEFAULTS }, false)));
-  check("filter: sliders apply once, in the top frame only",
-    !window.__mm.buildFilterCss({ ...window.__mm.DEFAULTS, brightness: 70 }, false).includes("brightness"));
+  // The ROOT filter is what must not be applied twice. A subframe's media rule
+  // does still carry slider values, and has to: the top frame's filter
+  // rasterises the subframe's painted output too, so media in there is adjusted
+  // by it and needs the same reversal to come back out true to colour.
+  check("filter: the root slider filter applies once, in the top frame only",
+    !/html[^{]*\{[^}]*brightness/.test(
+      window.__mm.buildFilterCss({ ...window.__mm.DEFAULTS, brightness: 70 }, false)),
+    norm(window.__mm.buildFilterCss({ ...window.__mm.DEFAULTS, brightness: 70 }, false)));
   // regression: <picture> wrapper triple-inverted its <img> into a negative
   check("filter: picture wrapper not in re-invert list", !/^img[^{]*picture/m.test(css()),
     norm(css().split("\n").find((l) => l.startsWith("img")) || ""));
@@ -861,6 +882,251 @@ async function mainSuite() {
   check("builder: filter contains invert", B.buildFilterCss({ ...B.DEFAULTS }).includes("invert(1)"));
   check("builder: sepia+grayscale flow through",
     B.cssFilterValue({ ...B.DEFAULTS, sepia: 40, grayscale: 20 }, false) === "sepia(40%) grayscale(20%)");
+
+  // --- media stays true to colour -------------------------------------------
+  // An element's own filter runs before any ancestor's, so the only way to
+  // exempt media from the root filter is to have it carry the exact reverse.
+  // "Exact" is the whole claim, and reversing a chain reverses its order too -
+  // brightness and contrast do not commute - so it is checked as arithmetic
+  // below rather than by eyeballing the string.
+  const mediaRule = (css) =>
+    (css.split("}").find((r) => /(^|\n)\s*img/.test(r) && r.includes("filter:")) || "");
+
+  const dynTuned = B.buildDynamicCss({ ...B.DEFAULTS, brightness: 130, contrast: 80 });
+  check("media: dynamic exempts media from the sliders",
+    /img[^{]*\{[^}]*filter:/.test(dynTuned), norm(mediaRule(dynTuned)));
+  check("media: the exemption names only elements that paint media themselves",
+    !/img[^{]*\{/.test(dynTuned.replace(/img:fullscreen[\s\S]*/, "")) ||
+    !/(picture|iframe|canvas|svg)/.test(mediaRule(dynTuned)), norm(mediaRule(dynTuned)));
+  // At default slider values there is nothing to reverse, so no image should be
+  // paying for a filter - and a filter creates a stacking context per element.
+  check("media: no rule at all when there is nothing to undo",
+    !/img[^{]*\{[^}]*filter:/.test(B.buildDynamicCss({ ...B.DEFAULTS })),
+    norm(mediaRule(B.buildDynamicCss({ ...B.DEFAULTS }))));
+  check("media: opting in hands media straight to the root filter",
+    !/img[^{]*\{[^}]*filter:/.test(
+      B.buildDynamicCss({ ...B.DEFAULTS, brightness: 130, themeImages: true })));
+
+  const filTuned = B.buildFilterCss({ ...B.DEFAULTS, brightness: 130, contrast: 80 }, true);
+  check("media: filter mode reverses the sliders as well as the invert",
+    /brightness/.test(mediaRule(filTuned)) && /invert\(1\)/.test(mediaRule(filTuned)),
+    norm(mediaRule(filTuned)));
+  check("media: opting in drops the re-invert too, so media inverts with the page",
+    !/(^|\n)img, video, embed, object \{/.test(
+      B.buildFilterCss({ ...B.DEFAULTS, themeImages: true }, true)));
+  // Fullscreen media is in the top layer, outside <html>, so the root filter
+  // never reaches it: true-to-colour media needs nothing, themed media needs
+  // the whole treatment applied directly because nothing above it will.
+  check("media: fullscreen media is left alone while true to colour",
+    /video:fullscreen[^{]*\{[^}]*filter: none/.test(
+      B.buildFilterCss({ ...B.DEFAULTS, brightness: 130 }, true)));
+  check("media: fullscreen media is themed directly when opted in",
+    /video:fullscreen[^{]*\{[^}]*invert\(1\)/.test(
+      B.buildFilterCss({ ...B.DEFAULTS, themeImages: true }, true)));
+
+  // --- the reversal is arithmetically exact ---------------------------------
+  // CSS filter functions are affine maps on sRGB components: v -> m*v + o.
+  // Composing the root chain with the media chain must land on the identity, or
+  // media is being "exempted" into some third colour nobody asked for.
+  const I3 = [[1,0,0],[0,1,0],[0,0,1]];
+  const mul = (A, Bm) => A.map((r, i) => Bm[0].map((_, j) => r.reduce((t, v, k) => t + v * Bm[k][j], 0)));
+  const apply = (m, v) => m.map((r) => r.reduce((t, x, k) => t + x * v[k], 0));
+  const lin = (m, o = [0, 0, 0]) => ({ m, o });
+  // Applying A then B: v -> Bm*(Am*v + Ao) + Bo
+  const then = (A, Bf) => ({ m: mul(Bf.m, A.m), o: apply(Bf.m, A.o).map((x, i) => x + Bf.o[i]) });
+  const SAT = (s) => lin([
+    [0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s],
+    [0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s],
+    [0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s]
+  ]);
+  const SEPIA_M = [[0.393,0.769,0.189],[0.349,0.686,0.168],[0.272,0.534,0.131]];
+  const FN = {
+    brightness: (a) => lin([[a,0,0],[0,a,0],[0,0,a]]),
+    contrast: (a) => ({ m: [[a,0,0],[0,a,0],[0,0,a]], o: [0.5 - 0.5*a, 0.5 - 0.5*a, 0.5 - 0.5*a] }),
+    saturate: SAT,
+    grayscale: (g) => SAT(1 - g),
+    sepia: (s) => lin(I3.map((r, i) => r.map((v, j) => (1 - s) * v + s * SEPIA_M[i][j]))),
+    invert: () => ({ m: [[-1,0,0],[0,-1,0],[0,0,-1]], o: [1, 1, 1] }),
+    "hue-rotate": (deg) => {
+      const c = Math.cos(deg * Math.PI / 180), s = Math.sin(deg * Math.PI / 180);
+      return lin([
+        [0.213 + c*0.787 - s*0.213, 0.715 - c*0.715 - s*0.715, 0.072 - c*0.072 + s*0.928],
+        [0.213 - c*0.213 + s*0.143, 0.715 + c*0.285 + s*0.140, 0.072 - c*0.072 - s*0.283],
+        [0.213 - c*0.213 - s*0.787, 0.715 - c*0.715 + s*0.715, 0.072 + c*0.928 + s*0.072]
+      ]);
+    }
+  };
+  // Parses a CSS filter list left to right, which is also the order it applies.
+  function compose(list) {
+    let acc = lin(I3);
+    for (const [, name, arg] of list.matchAll(/([a-z-]+)\(([^)]*)\)/g)) {
+      if (!FN[name]) throw new Error("unmodelled filter function: " + name);
+      const n = arg.endsWith("%") ? parseFloat(arg) / 100 : parseFloat(arg);
+      acc = then(acc, FN[name](name === "hue-rotate" ? parseFloat(arg) : n));
+    }
+    return acc;
+  }
+  const isIdentity = (f) => {
+    const dm = Math.max(...f.m.flatMap((r, i) => r.map((v, j) => Math.abs(v - I3[i][j]))));
+    return Math.max(dm, ...f.o.map(Math.abs));
+  };
+  // Half of one 8-bit colour step: the largest drift that cannot change a
+  // rendered pixel. An arbitrary epsilon would only be measuring how many
+  // decimals the builder prints; this measures whether anyone could see it.
+  const INVISIBLE = 1 / 255 / 2;
+  for (const tune of [
+    { brightness: 130 },
+    { contrast: 80 },
+    { brightness: 130, contrast: 80 },
+    { brightness: 70, contrast: 140, grayscale: 60 },
+    { grayscale: 100 }
+  ]) {
+    const s = { ...B.DEFAULTS, ...tune };
+    const drift = isIdentity(then(compose(B.undoFilterValue(s)), compose(B.cssFilterValue(s, false))));
+    const label = Object.entries(tune).map(([k, v]) => k + " " + v).join(", ");
+    // 100% grayscale has destroyed the colour - nothing reverses that, and the
+    // builder does not pretend otherwise. It is here to prove it fails loudly
+    // rather than silently emitting a saturate(Infinity).
+    if (tune.grayscale === 100) {
+      check("media: 100% grayscale is left unreversed rather than faked",
+        B.undoFilterValue(s) === "" && drift > 0.1, B.undoFilterValue(s) + " drift=" + drift.toFixed(4));
+    } else {
+      check(`media: dynamic reversal is exact (${label})`, drift < INVISIBLE, "drift=" + drift.toExponential(2));
+    }
+  }
+  // Same claim through the invert pair, which is what filter mode actually ships.
+  for (const tune of [{}, { brightness: 130, contrast: 80 }, { brightness: 90, grayscale: 40 }]) {
+    const s = { ...B.DEFAULTS, ...tune };
+    const media = `${B.undoFilterValue(s)} invert(1) hue-rotate(180deg)`.trim();
+    const drift = isIdentity(then(compose(media), compose(B.cssFilterValue(s, true))));
+    const label = Object.entries(tune).map(([k, v]) => k + " " + v).join(", ") || "defaults";
+    check(`media: filter-mode reversal is exact (${label})`, drift < INVISIBLE, "drift=" + drift.toExponential(2));
+  }
+  // --- and it never makes a pixel worse ------------------------------------
+  // The arithmetic above is exact, but a browser clamps to [0,1] between filter
+  // primitives, and a reversal that has to raise contrast pushes near-white
+  // above 1 and loses the headroom. What matters is the direction of the error:
+  // media carrying the reversal must never come out further from its true
+  // colour than media carrying nothing would have, or the exemption is costing
+  // the thing it exists to protect. Modelled with the clamp the maths omits.
+  const clamp = (v) => Math.min(1, Math.max(0, v));
+  const bright = (a) => (v) => a * v;
+  const contrast = (a) => (v) => a * v + (0.5 - 0.5 * a);
+  const SLIDER_PAIRS = [[130, 80], [70, 140], [150, 150], [130, 100], [50, 60], [110, 90]];
+  let everWorse = 0, inexactUnclipped = 0, clipped = 0, total = 0;
+  for (const [b, c] of SLIDER_PAIRS) {
+    // Reversal then root filter, in the order they actually reach a pixel.
+    const chain = [contrast(100 / c), bright(100 / b), bright(b / 100), contrast(c / 100)];
+    const root = [bright(b / 100), contrast(c / 100)];
+    for (let i = 0; i <= 255; i++) {
+      const v = i / 255;
+      total++;
+      let exempt = v, bare = v, hitTheEdge = false;
+      for (const f of chain) {
+        const raw = f(exempt);
+        if (raw < -1e-9 || raw > 1 + 1e-9) hitTheEdge = true;
+        exempt = clamp(raw);
+      }
+      for (const f of root) bare = clamp(f(bare));
+      if (Math.abs(exempt - v) > Math.abs(bare - v) + 1e-9) everWorse++;
+      if (hitTheEdge) clipped++;
+      else if (Math.abs(exempt - v) > 1e-6) inexactUnclipped++;
+    }
+  }
+  // The guarantee: whatever the sliders are set to, media carrying the reversal
+  // is never further from its true colour than media carrying nothing.
+  check("media: the reversal never leaves a channel worse off than no reversal",
+    everWorse === 0, everWorse + " of " + total + " channel values regressed");
+  // And where the browser did not have to clamp, it is not merely better - it
+  // is exact. What clipping costs is a highlight the root filter had already
+  // destroyed before the media rule could protect it, which no element filter
+  // can recover; at brightness 50 / contrast 60 white is simply gone.
+  check("media: exact for every channel the root filter has not already clipped",
+    inexactUnclipped === 0, inexactUnclipped + " inexact of " + (total - clipped) + " unclipped");
+
+  // Documented limitation, asserted so it cannot quietly become something else:
+  // sepia has no inverse among the CSS filter functions, so a warm cast still
+  // reaches media. Everything either side of it still cancels.
+  const sep = { ...B.DEFAULTS, sepia: 40, brightness: 130 };
+  check("media: sepia is knowingly left on media, not silently mis-reversed",
+    !B.undoFilterValue(sep).includes("sepia") &&
+    isIdentity(then(compose(B.undoFilterValue(sep)), compose(B.cssFilterValue(sep, false)))) > 0.01,
+    B.undoFilterValue(sep));
+
+  // --- a site's own theme ----------------------------------------------------
+  const withOwn = { ...B.DEFAULTS, mode: "dynamic", brightness: 100,
+                    siteOverrides: { [B.HOST]: { mode: "filter", brightness: 130, contrast: 80,
+                                                 sepia: 0, grayscale: 0, themeImages: true } } };
+  check("override: this host is painted with its own theme",
+    B.effective(withOwn).mode === "filter" && B.effective(withOwn).brightness === 130,
+    JSON.stringify(B.effective(withOwn).mode));
+  check("override: it reaches the stylesheet, not just the object",
+    B.buildCss(B.effective(withOwn)).includes("invert(1)"));
+  check("override: another host's theme is not borrowed",
+    B.effective({ ...withOwn, siteOverrides: { "somewhere-else.example": { mode: "filter" } } }).mode
+      === "dynamic");
+  // Exact host, unlike the exclusion list, which matches suffixes on purpose.
+  check("override: a parent domain's theme is not inherited",
+    B.effective({ ...withOwn, siteOverrides: { "example.com": { mode: "filter" } } }).mode === "dynamic");
+  check("override: policy stays shared - an override cannot re-enable a disabled site",
+    B.siteDisabled({ ...withOwn, disabledSites: [B.HOST] }) === true);
+  check("override: a corrupt entry falls back to the shared settings rather than throwing",
+    B.effective({ ...B.DEFAULTS, siteOverrides: "not-an-object" }).mode === "dynamic" &&
+    B.effective({ ...B.DEFAULTS, siteOverrides: { [B.HOST]: "junk" } }).mode === "dynamic");
+}
+
+// ---------------------------------------------------------------------------
+// Suite: the frame outlives the extension.
+//
+// Reloading, disabling or updating the extension kills the chrome.* bridge in
+// every frame already running the script, and every call made after that throws
+// outright. The rechecks armDetection schedules are the exposed path - they fire
+// 1s and 3s after DOMContentLoaded and reach chrome.storage.local through
+// rememberVerdict.
+//
+// The liveness poll cannot cover them. It runs every 5s, so a recheck always
+// gets there first; and on a page the engine stepped aside from it is not
+// running at all, because nothing was injected for it to reclaim. That page is
+// this one, which is why the suite loads against an already-dark body.
+// ---------------------------------------------------------------------------
+async function invalidatedSuite() {
+  await waitUntil(() => !!window.__mm.settings);
+  await waitUntil(() => window.__mm.nativeDark === true);
+
+  check("invalidated: the engine stepped aside from this page", !styleEl());
+  check("invalidated: nothing polls for the bridge on a stepped-aside page",
+    window.__mm.deadCheck === null, "deadCheck=" + window.__mm.deadCheck);
+  check("invalidated: rechecks are scheduled there all the same",
+    window.__mm.detectTimers.length > 0, "armed=" + window.__mm.detectTimers.length);
+
+  // The reload, exactly as Chrome delivers it: no notification and no callback -
+  // the id simply goes, and the next call throws.
+  const uncaught = [];
+  const onError = (e) => uncaught.push(e.message || String(e.error));
+  window.addEventListener("error", onError);
+  chrome.runtime.id = undefined;
+
+  // Emptying the list is the observable proof that a recheck fired and reclaimed
+  // the frame. Polled rather than slept: an unfocused tab throttles timers, and
+  // without the guard nothing ever clears it, so this is also the fail path.
+  await waitUntil(() => window.__mm.detectTimers.length === 0, 8000);
+  window.removeEventListener("error", onError);
+
+  check("invalidated: a recheck firing after the reload throws nothing",
+    uncaught.length === 0, uncaught.join(" | "));
+  check("invalidated: the frame dropped its pending rechecks",
+    window.__mm.detectTimers.length === 0, "left " + window.__mm.detectTimers.length);
+
+  // Backstop, free of the timing above: calling the recheck by hand is exactly
+  // what those timers do.
+  let thrown = null;
+  try {
+    window.__mm.checkNativeDark();
+  } catch (e) {
+    thrown = e && (e.message || String(e));
+  }
+  check("invalidated: a recheck run against a dead bridge throws nothing",
+    thrown === null, thrown);
 }
 
 function $id(id) { return document.getElementById(id); }
@@ -870,7 +1136,7 @@ function $id(id) { return document.getElementById(id); }
   try {
     // The verdict is taken as soon as the settings read resolves, so the page
     // must already look dark when content.js loads.
-    if (MODE === "nativedark") document.body.style.backgroundColor = "#111213";
+    if (MODE === "nativedark" || MODE === "invalidated") document.body.style.backgroundColor = "#111213";
     if (MODE === "earlycss") await installEarlyCss();
     // A remembered verdict from a previous visit, in place before content.js
     // reads it. The page itself stays light, so the hint is wrong on purpose.
@@ -882,6 +1148,7 @@ function $id(id) { return document.getElementById(id); }
     else if (MODE === "nativedark") await nativeDarkSuite();
     else if (MODE === "earlycss") await earlyCssSuite();
     else if (MODE === "hint") await hintSuite();
+    else if (MODE === "invalidated") await invalidatedSuite();
     else await mainSuite();
   } catch (e) {
     check("harness ran without throwing", false, (e && e.message) + " " + (e && e.stack || "").split("\n")[1]);
