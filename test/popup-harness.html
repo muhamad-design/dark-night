@@ -49,7 +49,7 @@ async function waitFor(fn, ms = 5000) {
   return false;
 }
 
-let store, listeners, writes, failNextWrite, tabUrl, win;
+let store, listeners, writes, failNextWrite, tabUrl, tabNativeDark, win;
 
 function makeChrome() {
   return {
@@ -82,7 +82,22 @@ function makeChrome() {
         removeListener(fn) { const i = listeners.indexOf(fn); if (i >= 0) listeners.splice(i, 1); }
       }
     },
-    tabs: { query(q, cb) { setTimeout(() => cb([{ id: 1, url: tabUrl }]), 0); } }
+    tabs: {
+      query(q, cb) { setTimeout(() => cb([{ id: 1, url: tabUrl }]), 0); },
+      // The content script's top-frame status answer. null models a page with
+      // no content script: the callback fires with nothing, lastError set.
+      sendMessage(id, msg, cb) {
+        setTimeout(() => {
+          if (tabNativeDark === null) {
+            win.chrome.runtime.lastError = { message: "Could not establish connection" };
+            if (cb) cb();
+            win.chrome.runtime.lastError = null;
+            return;
+          }
+          if (cb) cb({ nativeDark: tabNativeDark });
+        }, 0);
+      }
+    }
   };
 }
 
@@ -96,7 +111,7 @@ function externalSet(patch) {
   listeners.forEach((fn) => fn(changes, "sync"));
 }
 
-async function mount(initialStore, url) {
+async function mount(initialStore, url, nativeDark = false) {
   const html = await (await fetch("../popup/dist/index.html?t=" + performance.now(), { cache: "no-store" })).text();
   const frame = document.getElementById("stage");
   await new Promise((res) => { frame.onload = res; frame.src = "about:blank"; });
@@ -108,6 +123,7 @@ async function mount(initialStore, url) {
   writes = 0;
   failNextWrite = false;
   tabUrl = url;
+  tabNativeDark = nativeDark;
 
   win = frame.contentWindow;
   win.chrome = makeChrome();
@@ -332,6 +348,46 @@ async function run() {
     slider("sepia").getAttribute("aria-valuenow"));
   check("sanitize: non-array exclusion list does not crash the popup",
     txt("#excludedCount") === "No sites excluded", txt("#excludedCount"));
+
+  // --- a page that measured as already dark ---------------------------------
+  await mount(CLEAN, "https://dark.example.com/", true);
+  check("nativedark: banner shown when the page measured dark",
+    !!$("#nativeDarkNote"), txt("#nativeDarkNote"));
+  check("nativedark: banner says it stepped aside",
+    txt("#nativeDarkNote").includes("stepped aside"), txt("#nativeDarkNote"));
+  $("#forceSite").click();
+  await waitFor(() => (store.forcedSites || []).length === 1);
+  check("nativedark: theme-it-anyway stores the host",
+    JSON.stringify(store.forcedSites) === '["dark.example.com"]', JSON.stringify(store.forcedSites));
+  await waitFor(() => !!$("#forcedNote"));
+  check("nativedark: banner flips to the forced state",
+    !!$("#forcedNote") && !$("#nativeDarkNote"));
+  $("#unforceSite").click();
+  await waitFor(() => store.forcedSites.length === 0);
+  check("nativedark: step-aside removes the entry",
+    JSON.stringify(store.forcedSites) === "[]", JSON.stringify(store.forcedSites));
+  await waitFor(() => !!$("#nativeDarkNote"));
+  check("nativedark: banner returns once the force is released", !!$("#nativeDarkNote"));
+
+  // --- the auto-skip switch --------------------------------------------------
+  const autoSwitch = $('#autoSkipRow [role="switch"]');
+  check("nativedark: auto-skip switch present with a name",
+    !!autoSwitch && !!autoSwitch.getAttribute("aria-label"),
+    autoSwitch && autoSwitch.getAttribute("aria-label"));
+  check("nativedark: auto-skip is on by default",
+    autoSwitch.getAttribute("aria-checked") === "true");
+  autoSwitch.click();
+  await waitFor(() => store.autoSkipNativeDark === false);
+  check("nativedark: toggling writes the setting", store.autoSkipNativeDark === false);
+  await waitFor(() => !$("#nativeDarkNote"));
+  check("nativedark: banner hidden while auto-skip is off", !$("#nativeDarkNote"));
+
+  // --- no banner where it does not belong ------------------------------------
+  await mount(CLEAN, "https://example.com/", false);
+  check("nativedark: no banner on a light page", !$("#nativeDarkNote") && !$("#forcedNote"));
+  await mount(CLEAN, "https://example.com/", null); // no content script answered
+  check("nativedark: unanswered status query leaves the popup calm",
+    !!$('[data-loaded="true"]') && !$("#nativeDarkNote"));
 
   // --- pages Chrome will not let us theme -----------------------------------
   await mount(CLEAN, "chrome://extensions");

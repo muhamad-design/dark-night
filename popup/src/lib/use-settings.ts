@@ -8,6 +8,7 @@ export interface SettingsApi {
   settings: Settings;
   loaded: boolean;
   currentSite: string | null;
+  nativeDark: boolean;
   status: string;
   statusIsError: boolean;
   save: (patch: Patch, opts?: { defer?: boolean }) => void;
@@ -18,8 +19,10 @@ export function useSettings(): SettingsApi {
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
   const [loaded, setLoaded] = useState(false);
   const [currentSite, setCurrentSite] = useState<string | null>(null);
+  const [nativeDark, setNativeDark] = useState(false);
   const [status, setStatusText] = useState("");
   const [statusIsError, setStatusIsError] = useState(false);
+  const tabId = useRef<number | null>(null);
 
   // Refs, not state: these are read inside callbacks that must see the latest
   // value without re-subscribing.
@@ -70,6 +73,32 @@ export function useSettings(): SettingsApi {
     [flush]
   );
 
+  // The content script's top-frame instance knows whether the page measured as
+  // already dark. No script there (a chrome:// page, a fresh install before
+  // adoption) leaves lastError set and the flag simply stays false.
+  const queryNativeDark = useCallback(() => {
+    if (tabId.current === null || !chrome.tabs?.sendMessage) return;
+    chrome.tabs.sendMessage(tabId.current, { type: "dark-night:status" }, (resp) => {
+      if (chrome.runtime.lastError || !resp) return;
+      setNativeDark(!!resp.nativeDark);
+    });
+  }, []);
+
+  // Switching auto-skip on mid-session makes the content script measure for
+  // the first time; without a re-ask the popup would keep a stale "not dark"
+  // from before the toggle. Delayed a tick so the measurement lands first.
+  const autoSkipSeen = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (autoSkipSeen.current === null) {
+      autoSkipSeen.current = settings.autoSkipNativeDark;
+      return;
+    }
+    if (autoSkipSeen.current === settings.autoSkipNativeDark) return;
+    autoSkipSeen.current = settings.autoSkipNativeDark;
+    const t = setTimeout(queryNativeDark, 150);
+    return () => clearTimeout(t);
+  }, [settings.autoSkipNativeDark, queryNativeDark]);
+
   const applyChanges = useCallback((changes: Changes) => {
     setSettings((prev) => {
       const merged: Record<string, unknown> = { ...prev };
@@ -107,6 +136,8 @@ export function useSettings(): SettingsApi {
           const url = new URL(tab.url as string);
           if (url.protocol === "http:" || url.protocol === "https:") {
             setCurrentSite(url.hostname);
+            tabId.current = tab.id ?? null;
+            queryNativeDark();
           }
         } catch {
           /* chrome:// pages, or site access withheld so tab.url is unreadable */
@@ -130,7 +161,7 @@ export function useSettings(): SettingsApi {
       window.removeEventListener("pagehide", flush);
       window.removeEventListener("blur", flush);
     };
-  }, [applyChanges, flush]);
+  }, [applyChanges, flush, queryNativeDark]);
 
-  return { settings, loaded, currentSite, status, statusIsError, save, setStatus };
+  return { settings, loaded, currentSite, nativeDark, status, statusIsError, save, setStatus };
 }

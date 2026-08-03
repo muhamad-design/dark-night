@@ -11,6 +11,8 @@ export interface Settings {
   sepia: number;
   grayscale: number;
   disabledSites: string[];
+  autoSkipNativeDark: boolean;
+  forcedSites: string[];
 }
 
 export const DEFAULTS: Settings = {
@@ -20,7 +22,9 @@ export const DEFAULTS: Settings = {
   contrast: 100,
   sepia: 0,
   grayscale: 0,
-  disabledSites: []
+  disabledSites: [],
+  autoSkipNativeDark: true,
+  forcedSites: []
 };
 
 export const SLIDERS = ["brightness", "contrast", "sepia", "grayscale"] as const;
@@ -80,8 +84,14 @@ export function sanitize(raw: Partial<Settings> | Record<string, unknown>): Sett
     const n = Number(s[key]);
     s[key] = Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : DEFAULTS[key];
   }
-  s.disabledSites = Array.isArray(s.disabledSites)
-    ? [...new Set(s.disabledSites.filter((d) => typeof d === "string" && d).map(bare))]
-    : [];
+  s.autoSkipNativeDark = s.autoSkipNativeDark !== false;
+  s.disabledSites = cleanSites(s.disabledSites);
+  s.forcedSites = cleanSites(s.forcedSites);
   return s;
+}
+
+function cleanSites(raw: unknown): string[] {
+  return Array.isArray(raw)
+    ? [...new Set(raw.filter((d) => typeof d === "string" && d).map(bare))]
+    : [];
 }

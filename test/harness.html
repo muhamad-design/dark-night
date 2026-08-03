@@ -106,6 +106,16 @@ window.chrome = {
 
 const set = (patch) => new Promise((r) => chrome.storage.sync.set(patch, r));
 const tick = (ms = 30) => new Promise((r) => setTimeout(r, ms));
+// Chrome throttles timers in an unfocused tab, so anything racing a real-time
+// recheck must poll for the condition instead of sleeping a fixed span.
+async function waitUntil(fn, ms = 9000) {
+  const t0 = performance.now();
+  while (performance.now() - t0 < ms) {
+    if (fn()) return true;
+    await tick(20);
+  }
+  return fn();
+}
 
 // ---------------------------------------------------------------------------
 const results = [];
@@ -191,10 +201,11 @@ async function loadContentScript() {
   new Function(src.replace(marker,
     `  window.__mm = {
        buildCss, buildDynamicCss, buildFilterCss, cssFilterValue,
-       siteDisabled, HOST, DEFAULTS, READY_ATTR, SP,
+       siteDisabled, HOST, DEFAULTS, READY_ATTR, SP, colorIsDark,
        get settings() { return settings; },
        get observer() { return observer; },
-       get deadCheck() { return deadCheck; }
+       get deadCheck() { return deadCheck; },
+       get nativeDark() { return nativeDark; }
      };
    })();`
   ))();
@@ -224,6 +235,82 @@ async function pendingSuite() {
     htmlFilter().includes("brightness(1.3)"),
     htmlFilter()
   );
+}
+
+// ---------------------------------------------------------------------------
+// Suite: a page that is already dark before the extension looks at it.
+// The body is painted dark in the runner, BEFORE content.js loads, because the
+// verdict is taken as soon as the settings read resolves.
+// ---------------------------------------------------------------------------
+async function nativeDarkSuite() {
+  // --- the kickoff verdict: an already-dark page is left alone ---
+  await waitUntil(() => window.__mm.nativeDark === true);
+  check("nativedark: verdict is dark", window.__mm.nativeDark === true);
+  check("nativedark: already-dark page is not themed", !styleEl());
+  check("nativedark: page keeps its own background", bodyBg() === "rgb(17, 18, 19)", bodyBg());
+  check("nativedark: pre-paint sheet still released",
+    document.documentElement.hasAttribute("data-dark-night-ready"));
+
+  // --- the scheduled recheck, in real time ---
+  // The page flips itself light with no settings change at all; one of the
+  // delayed passes has to notice and bring the theme back on its own. Ordered
+  // by events, not by clock: whether the flip lands before the 1s or the 3s
+  // recheck, some recheck measures the light page - so tab throttling, which
+  // stretches this suite's own awaits past those marks, cannot break it.
+  document.body.style.backgroundColor = "#ffffff";
+  const rethemed = await waitUntil(() => !!styleEl());
+  check("nativedark: page turned light, a scheduled recheck re-themes", rethemed);
+  check("nativedark: verdict followed the page", window.__mm.nativeDark === false);
+  // The measurement lifts the injected sheet for the read: painted dark by our
+  // own theme, the page must still measure as light underneath.
+  check("nativedark: measurement not fooled by our own dark theme",
+    bodyBg() === DARK && window.__mm.nativeDark === false, bodyBg());
+
+  // --- the colour classifier, on the real function ---
+  const dark = window.__mm.colorIsDark;
+  check("classify: white is light", dark("rgb(255, 255, 255)") === false);
+  check("classify: near-black is dark", dark("rgb(17, 18, 19)") === true);
+  check("classify: mid grey is light", dark("rgb(160, 160, 160)") === false);
+  check("classify: fully transparent is unknown", dark("rgba(0, 0, 0, 0)") === null);
+  check("classify: translucent is unknown", dark("rgba(20, 20, 20, 0.3)") === null);
+  check("classify: opaque rgba is classified", dark("rgba(20, 20, 20, 0.9)") === true);
+  check("classify: oklch dark (Tailwind 4 syntax)", dark("oklch(0.2 0 0)") === true);
+  check("classify: oklch light", dark("oklch(0.95 0 0)") === false);
+  check("classify: oklch percentage lightness", dark("oklch(20% 0 0)") === true);
+  check("classify: lab dark", dark("lab(20 0 0)") === true);
+  check("classify: lab light", dark("lab(90 0 0)") === false);
+  check("classify: unparsed keyword is unknown", dark("ButtonFace") === null);
+
+  // --- re-measurement on a policy nudge, immediately ---
+  // Back to dark: toggling auto-skip re-takes the verdict without waiting for
+  // any timer, and the fresh verdict steps aside again.
+  document.body.style.backgroundColor = "#111213";
+  await set({ autoSkipNativeDark: false });
+  await set({ autoSkipNativeDark: true });
+  await waitUntil(() => !styleEl());
+  check("nativedark: policy nudge re-measures and steps aside", !styleEl(), bodyBg());
+  check("nativedark: verdict is dark again", window.__mm.nativeDark === true);
+
+  // --- forcedSites overrides the verdict ---
+  const host = window.__mm.HOST;
+  await set({ forcedSites: [host] });
+  await waitUntil(() => !!styleEl());
+  check("nativedark: forcing the site themes it anyway", !!styleEl());
+  check("nativedark: forced page renders the beUI theme", bodyBg() === DARK, bodyBg());
+
+  await set({ forcedSites: [] });
+  await waitUntil(() => !styleEl());
+  check("nativedark: releasing the force steps aside again", !styleEl());
+
+  // --- the feature toggle ---
+  await set({ autoSkipNativeDark: false });
+  await waitUntil(() => !!styleEl());
+  check("nativedark: auto-skip off themes the dark page", !!styleEl());
+  check("nativedark: auto-skip off renders dark theme", bodyBg() === DARK, bodyBg());
+
+  await set({ autoSkipNativeDark: true });
+  await waitUntil(() => !styleEl());
+  check("nativedark: auto-skip back on steps aside", !styleEl());
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +422,10 @@ async function mainSuite() {
   const upgraded = $id("upgradeHost");
   const upgradedRoot = upgraded.attachShadow({ mode: "open" });
   upgradedRoot.innerHTML = '<div id="upgradedInner">upgraded in place</div>';
-  await tick(700);   // the first decaying sweep runs at 300ms
+  // Polled, not slept: the decaying sweeps start at 300ms but tab throttling
+  // stretches both the sweeps and a fixed sleep, so only the outcome is stable.
+  await waitUntil(() =>
+    getComputedStyle(upgradedRoot.getElementById("upgradedInner")).backgroundColor === DARK);
   check("shadow: element upgraded in place (no mutation record) is themed",
     getComputedStyle(upgradedRoot.getElementById("upgradedInner")).backgroundColor === DARK,
     getComputedStyle(upgradedRoot.getElementById("upgradedInner")).backgroundColor);
@@ -349,8 +439,9 @@ async function mainSuite() {
       r.innerHTML = '<style>.surface{background:#fff}</style><div class="surface" id="lateSurface">late component</div>';
     }
   });
-  await tick(1400);
   const lateEl = $id("lateComponent");
+  await waitUntil(() => lateEl.shadowRoot &&
+    getComputedStyle(lateEl.shadowRoot.getElementById("lateSurface")).backgroundColor === DARK);
   check("shadow: a real customElements.define upgrade is themed",
     getComputedStyle(lateEl.shadowRoot.getElementById("lateSurface")).backgroundColor === DARK,
     getComputedStyle(lateEl.shadowRoot.getElementById("lateSurface")).backgroundColor);
@@ -576,8 +667,12 @@ function $id(id) { return document.getElementById(id); }
 // ---------------------------------------------------------------------------
 (async () => {
   try {
+    // The verdict is taken as soon as the settings read resolves, so the page
+    // must already look dark when content.js loads.
+    if (MODE === "nativedark") document.body.style.backgroundColor = "#111213";
     await loadContentScript();
     if (MODE === "pending") await pendingSuite();
+    else if (MODE === "nativedark") await nativeDarkSuite();
     else await mainSuite();
   } catch (e) {
     check("harness ran without throwing", false, (e && e.message) + " " + (e && e.stack || "").split("\n")[1]);

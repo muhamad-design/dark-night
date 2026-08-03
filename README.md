@@ -69,6 +69,8 @@ SIL Open Font License 1.1; the licence travels with the fonts.
 | Disable for this site | Per-site opt-out. Matches subdomains, and ignores a leading `www.` |
 | Dynamic / Filter | The two theming engines (below). |
 | Sliders | Brightness, contrast, sepia, grayscale - applied in both engines. Stepped in 10s, so beUI draws a tick per step (it stops drawing them past 50 steps, which a finer step would exceed). |
+| Skip sites that are already dark | On by default. A page that is already rendering dark - its own toggle, a stored preference, a `prefers-color-scheme` theme - is left alone (below). |
+| Theme it anyway | Shown when the extension stepped aside on the current site; overrides the detection for that site permanently. `Step aside` undoes it. |
 | Excluded sites | The list at the bottom of the popup removes an opt-out without visiting the site. |
 
 **Opening the popup never animates anything in.** Rendering with defaults and snapping to
@@ -88,6 +90,29 @@ Settings live in `chrome.storage.sync`, so they follow the Chrome profile across
 Slider drags are coalesced into one write; every other control writes immediately. If a
 write is ever rejected the popup reverts to what is actually stored and says so, rather
 than showing a state that was never saved.
+
+## Native dark detection
+
+"Does this site offer dark mode" is not answerable from a content script - cross-origin
+stylesheets hide their rules - but "is this page rendering dark right now" is. Once the
+page has real styles (DOMContentLoaded, re-checked at 1s and 3s for late-hydrating SPAs),
+the content script lifts its own stylesheet, reads the page's background colour, and
+restores it - one synchronous task, so the unthemed frame is never painted. If the page
+measures dark (relative luminance, with `oklch`/`lab` and `color-scheme` fallbacks), the
+theme steps aside for that load and the popup says so.
+
+Only the top frame measures; subframes follow its verdict over `postMessage`, because in
+filter mode a subframe's CSS assumes the top frame's filter exists and frames must agree.
+
+The verdict is a measurement, not a stored state - nothing is written to the exclusion
+list, so a site that later drops its dark theme is themed again automatically. Two settings
+control it: `autoSkipNativeDark` (the popup switch, default on) and `forcedSites` ("Theme
+it anyway", per site).
+
+One case is deliberately not a miss: if the browser prefers light and the site only goes
+dark via `prefers-color-scheme`, the page really is rendering light, and theming it is the
+correct outcome. A content script cannot spoof the media query to find out what the site
+*would* do.
 
 ## The two engines
 
@@ -153,8 +178,9 @@ python3 -m http.server 8765
 | --- | --- |
 | `localhost:8765/test/harness.html` | 102 assertions: both engines, specificity, shadow DOM (including a real custom-element upgrade), frames, top layer, sliders, toggles, per-site rules, liveness-poll gating, self-heal, host matching |
 | `localhost:8765/test/harness.html?suite=pending` | A settings write landing between the initial storage read and its callback |
+| `localhost:8765/test/harness.html?suite=nativedark` | 28 assertions: the colour classifier, stepping aside on an already-dark page, the scheduled recheck catching a page that flips, `forcedSites` and the auto-skip toggle |
 | `localhost:8765/test/perf-bench.html` | Style-resolution cost of the real dynamic sheet on a ~9,500-element DOM, and a guard on the specificity booster: it must stay cascade-identical to the chained form and beat it head-to-head |
-| `localhost:8765/test/popup-harness.html` | 65 assertions: the **built** React popup against a mocked `chrome`, including beUI component wiring, rejected writes, external changes and corrupt settings |
+| `localhost:8765/test/popup-harness.html` | 77 assertions: the **built** React popup against a mocked `chrome`, including beUI component wiring, rejected writes, external changes, corrupt settings and the native-dark banner |
 | `localhost:8765/test/worker-harness.html` | 32 assertions: the real `background.js` driven as a black box against a mocked MV3 surface - registration lifecycle, badge clearing, tab adoption, the shortcut, host matching, corrupt storage |
 | `localhost:8765/test/test.html?mode=dynamic\|filter\|off` | Visual page with the layout patterns that commonly break dark-mode extensions |
 
@@ -191,6 +217,10 @@ confirm that.
 - **Filter mode inverts `position: fixed` layering** on some sites, and moving a slider in
   dynamic mode applies a filter to `<html>`, which makes it a containing block for fixed
   elements. Both are inherent to CSS filters.
+- **Native dark detection reads the rendered page, not the site's intent.** A dark splash
+  screen or hero can step the theme aside for a load until a recheck corrects it, and a
+  site whose dark theme only exists behind `prefers-color-scheme` while the browser prefers
+  light is - correctly - treated as a light page. `Theme it anyway` overrides per site.
 - Chrome blocks content scripts on `chrome://` pages, the Web Store, and other extensions'
   pages, so those always stay light. The popup says so instead of offering a toggle that
   would do nothing.

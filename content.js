@@ -28,7 +28,9 @@
     contrast: 100, // 50..150
     sepia: 0, // 0..100
     grayscale: 0, // 0..100
-    disabledSites: []
+    disabledSites: [],
+    autoSkipNativeDark: true, // step aside when the page is already dark
+    forcedSites: [] // theme these even when they already look dark
   };
 
   let settings = null;
@@ -62,11 +64,19 @@
     return host.replace(/^www\./, "");
   })();
 
-  function siteDisabled(s) {
-    return s.disabledSites.some((entry) => {
+  function hostInList(list) {
+    return list.some((entry) => {
       const d = entry.replace(/^www\./, "");
       return HOST === d || HOST.endsWith("." + d);
     });
+  }
+
+  function siteDisabled(s) {
+    return hostInList(s.disabledSites);
+  }
+
+  function siteForced(s) {
+    return hostInList(s.forcedSites);
   }
 
   function cssFilterValue(s, withInvert) {
@@ -464,10 +474,169 @@ ${filterRule}
   }
 
   // --------------------------------------------------------------------------
+  // Native dark detection
+  //
+  // A site that is already dark - its own toggle, a stored preference, a
+  // prefers-color-scheme theme - gains nothing from being themed again, and in
+  // filter mode it gets inverted into a blinding white page. "Offers dark mode"
+  // is not answerable from here (cross-origin stylesheets hide their rules),
+  // but "is rendering dark right now" is: read the page's own background with
+  // the injected sheet lifted and step aside when it is dark. If the browser
+  // prefers light and the site only goes dark via prefers-color-scheme, the
+  // page really is rendering light and theming it is the correct outcome.
+  //
+  // Only the top frame measures. In filter mode a subframe's CSS assumes the
+  // ancestor filter exists, so frames must agree on one verdict; the top hands
+  // it out over postMessage. Page JS shares the window and could spoof either
+  // message, but all that buys it is flipping the theme in its own iframes,
+  // which the page could do to itself anyway.
+  // --------------------------------------------------------------------------
+  const DETECT_RECHECKS = [1000, 3000]; // SPAs restyle after hydration
+  const MSG_QUERY = "dark-night:verdict?";
+  const MSG_VERDICT = "dark-night:verdict";
+
+  let nativeDark = false; // top frame: last measurement; subframe: the top's verdict
+  let detectionArmed = false;
+  const detectTimers = [];
+  const childFrames = []; // every frame that has ever asked for the verdict
+
+  function steppedAside(s) {
+    return nativeDark && s.autoSkipNativeDark && !siteForced(s);
+  }
+
+  // true / false / null for "cannot tell" - transparent, translucent, or a
+  // syntax this does not parse. Failing toward light is the safe direction:
+  // the theme just applies, which is the behaviour the user installed.
+  function colorIsDark(color) {
+    let m = /^rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?\)$/.exec(color);
+    if (m) {
+      if (m[4] !== undefined && Number(m[4]) < 0.5) return null; // see-through
+      const lin = (c) => {
+        const v = Number(c) / 255;
+        return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+      };
+      return 0.2126 * lin(m[1]) + 0.7152 * lin(m[2]) + 0.0722 * lin(m[3]) < 0.2;
+    }
+    // Chrome serialises modern-syntax backgrounds (Tailwind 4 emits oklch) in
+    // their own notation; the first component is always lightness.
+    m = /^(oklch|oklab|lab|lch)\(\s*([\d.]+)(%?)/.exec(color);
+    if (m) {
+      let l = Number(m[2]);
+      if (m[3] === "%" || m[1] === "lab" || m[1] === "lch") l /= 100;
+      return l < 0.45;
+    }
+    return null;
+  }
+
+  function readPageDark() {
+    for (const el of [document.body, document.documentElement]) {
+      if (!el) continue;
+      const v = colorIsDark(getComputedStyle(el).backgroundColor);
+      if (v !== null) return v;
+    }
+    // Both transparent: the canvas shows through, and its colour follows the
+    // document's own color-scheme - "light dark" follows the browser setting.
+    const scheme = getComputedStyle(document.documentElement).colorScheme || "";
+    if (!/\bdark\b/.test(scheme)) return false;
+    if (/\blight\b/.test(scheme)) return matchMedia("(prefers-color-scheme: dark)").matches;
+    return true;
+  }
+
+  // The injected sheet paints the page dark itself, so it is lifted for the
+  // read. Lift, read, restore is one synchronous task: the browser recalculates
+  // style for the read but never paints the unthemed frame, so nothing flashes.
+  function measurePageDark() {
+    const style = document.getElementById(STYLE_ID);
+    const lifted = !!(style && !style.disabled);
+    if (lifted) style.disabled = true;
+    try {
+      return readPageDark();
+    } finally {
+      if (lifted) style.disabled = false;
+    }
+  }
+
+  function checkNativeDark() {
+    if (!IS_TOP || !settings || !document.body) return;
+    // Measured only while the result could matter; when the extension or the
+    // site is off, or auto-skip is off, the verdict is simply "not stepping
+    // aside" and the page is never touched for it.
+    const worth = settings.enabled && !siteDisabled(settings) && settings.autoSkipNativeDark;
+    const verdict = worth ? measurePageDark() : false;
+    if (verdict === nativeDark) return;
+    nativeDark = verdict;
+    applyTheme();
+    for (const w of childFrames) {
+      try {
+        w.postMessage({ type: MSG_VERDICT, dark: nativeDark }, "*");
+      } catch (e) {
+        /* frame navigated away */
+      }
+    }
+  }
+
+  function armDetection() {
+    if (detectionArmed) return;
+    detectionArmed = true;
+    if (!IS_TOP) {
+      // Ask once; the top answers immediately and again on every change.
+      try {
+        window.top.postMessage(MSG_QUERY, "*");
+      } catch (e) {
+        /* detached frame */
+      }
+      return;
+    }
+    const kickoff = () => {
+      checkNativeDark();
+      for (const delay of DETECT_RECHECKS) detectTimers.push(setTimeout(checkNativeDark, delay));
+    };
+    // Not before DOMContentLoaded: at document_start the body has no styles
+    // yet, and a site's own dark theme often arrives with its stylesheet or a
+    // hydration script, both of which have run by then.
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", kickoff, { once: true });
+    } else {
+      kickoff();
+    }
+  }
+
+  if (IS_TOP) {
+    window.addEventListener("message", (e) => {
+      if (e.data !== MSG_QUERY || !e.source || e.source === window) return;
+      if (!childFrames.includes(e.source)) childFrames.push(e.source);
+      try {
+        e.source.postMessage({ type: MSG_VERDICT, dark: nativeDark }, "*");
+      } catch (err) {
+        /* frame navigated away */
+      }
+    });
+  } else {
+    window.addEventListener("message", (e) => {
+      if (e.source !== window.top) return;
+      const d = e.data;
+      if (!d || d.type !== MSG_VERDICT || typeof d.dark !== "boolean") return;
+      if (d.dark === nativeDark) return;
+      nativeDark = d.dark;
+      if (settings) applyTheme();
+    });
+  }
+
+  // The popup asks whether this page was measured as already dark, so it can
+  // offer "theme it anyway". Only the top frame answers; subframes return
+  // nothing and Chrome delivers the one response that was sent.
+  if (chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      if (!IS_TOP || !msg || msg.type !== "dark-night:status") return;
+      sendResponse({ nativeDark });
+    });
+  }
+
+  // --------------------------------------------------------------------------
 
   function applyTheme() {
     if (!settings) return;
-    const active = settings.enabled && !siteDisabled(settings);
+    const active = settings.enabled && !siteDisabled(settings) && !steppedAside(settings);
     let style = document.getElementById(STYLE_ID);
 
     if (!active) {
@@ -502,6 +671,9 @@ ${filterRule}
   // so there is no false positive to worry about.
   function teardown() {
     stopDeadCheck();
+    // A recheck firing after the bridge died would re-measure and could
+    // re-apply the theme this teardown just removed.
+    while (detectTimers.length) clearTimeout(detectTimers.pop());
     const style = document.getElementById(STYLE_ID);
     if (style) style.remove();
     stopShadow();
@@ -599,6 +771,7 @@ ${filterRule}
       pending = null;
     }
     applyTheme();
+    armDetection();
     // Releases the pre-paint stylesheet registered by the service worker.
     document.documentElement.setAttribute(READY_ATTR, "");
   });
@@ -611,5 +784,12 @@ ${filterRule}
     }
     mergeChanges(changes);
     applyTheme();
+    // A policy change can invalidate the last measurement - auto-skip switched
+    // on mid-session, the site force-themed or released, the extension or the
+    // site re-enabled - so the verdict is re-taken right away rather than
+    // waiting for a reload.
+    if (changes.enabled || changes.disabledSites || changes.autoSkipNativeDark || changes.forcedSites) {
+      checkNativeDark();
+    }
   });
 })();

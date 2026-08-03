@@ -41,7 +41,8 @@ function Skeleton() {
 }
 
 export default function App() {
-  const { settings, loaded, currentSite, status, statusIsError, save, setStatus } = useSettings();
+  const { settings, loaded, currentSite, nativeDark, status, statusIsError, save, setStatus } =
+    useSettings();
   const listRef = useRef<HTMLUListElement>(null);
   const summaryRef = useRef<HTMLElement>(null);
   const focusAfterRemove = useRef<number | null>(null);
@@ -59,6 +60,24 @@ export default function App() {
   const entry = blockingEntry(currentSite, settings.disabledSites);
   const host = currentSite ? bare(currentSite) : null;
   const excludedByParent = !!entry && entry !== host;
+  const forcedEntry = blockingEntry(currentSite, settings.forcedSites);
+  // Mirrors steppedAside() in content.js, against the popup's live settings, so
+  // "Theme it anyway" flips the banner without a round-trip to the page.
+  const steppedAside =
+    nativeDark && settings.autoSkipNativeDark && !forcedEntry && !entry && settings.enabled;
+  const forcedOverDark = nativeDark && !!forcedEntry && !entry && settings.enabled;
+
+  function forceSite() {
+    if (!host) return;
+    save({ forcedSites: [...settings.forcedSites, host] });
+    setStatus(`Theming ${host} over its own dark look`);
+  }
+
+  function unforceSite() {
+    if (!forcedEntry) return;
+    save({ forcedSites: settings.forcedSites.filter((d) => d !== forcedEntry) });
+    setStatus(`Stepped aside on ${forcedEntry}`);
+  }
 
   function toggleSite() {
     if (!host) return;
@@ -154,6 +173,28 @@ export default function App() {
             </motion.p>
           )}
         </AnimatePresence>
+        {/* Rendered plainly, no entrance animation - see the note above. The
+            text is information; a frozen entrance would leave it invisible. */}
+        {steppedAside && (
+          <div id="nativeDarkNote" className="mt-2 flex items-center justify-between gap-2">
+            <p className="text-[11px] leading-snug text-muted-foreground">
+              Already dark - stepped aside.
+            </p>
+            <Button id="forceSite" variant="ghost" size="sm" onClick={forceSite}>
+              Theme it anyway
+            </Button>
+          </div>
+        )}
+        {forcedOverDark && (
+          <div id="forcedNote" className="mt-2 flex items-center justify-between gap-2">
+            <p className="text-[11px] leading-snug text-muted-foreground">
+              Themed over the site's own dark look.
+            </p>
+            <Button id="unforceSite" variant="ghost" size="sm" onClick={unforceSite}>
+              Step aside
+            </Button>
+          </div>
+        )}
       </section>
 
       {/* Engine --------------------------------------------------------- */}
@@ -205,6 +246,20 @@ export default function App() {
             />
           </div>
         ))}
+      </section>
+
+      {/* Auto-skip ------------------------------------------------------- */}
+      <section
+        id="autoSkipRow"
+        className="flex items-center justify-between gap-3 border-t border-border px-4 py-3"
+        inert={off ? true : undefined}
+      >
+        <span className="text-xs text-foreground">Skip sites that are already dark</span>
+        <Switch
+          checked={settings.autoSkipNativeDark}
+          onCheckedChange={(next) => save({ autoSkipNativeDark: next })}
+          ariaLabel="Skip sites that are already dark"
+        />
       </section>
 
       <footer className="flex items-center justify-between px-4 pb-3" inert={off ? true : undefined}>
