@@ -5,3 +5,7 @@ popup/dist/
 .vite/
 *.tsbuildinfo
 .DS_Store
+
+# Session handoff / assistant notes - not for the public repo.
+CLAUDE.md
+NEXT_SESSION.md
