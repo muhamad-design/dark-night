@@ -133,6 +133,23 @@ function paint(done) {
     (done ? "" : "  ... still running");
 }
 
+const READY = "data-dark-night-ready";
+
+// The real pre-paint sheet, put on the page the way the service worker
+// registers it - before content.js runs - and a transparent <body>, which is
+// what most light sites actually have. Injected as a <style> from the fetched
+// text rather than a <link> so it is guaranteed to be in effect, not still
+// loading, when the first measurement happens.
+let EARLY_CSS_TEXT = "";
+async function installEarlyCss() {
+  EARLY_CSS_TEXT = await (await fetch("../early.css?t=" + performance.now(), { cache: "no-store" })).text();
+  const s = document.createElement("style");
+  s.id = "early-css-under-test";
+  s.textContent = EARLY_CSS_TEXT;
+  document.head.appendChild(s);
+  document.body.style.backgroundColor = "transparent";
+}
+
 const styleEl = () => document.getElementById("dark-night-style");
 const css = () => (styleEl() ? styleEl().textContent : "");
 const htmlFilter = () => getComputedStyle(document.documentElement).filter;
@@ -209,6 +226,54 @@ async function loadContentScript() {
      };
    })();`
   ))();
+}
+
+// ---------------------------------------------------------------------------
+// Suite: detection runs while the PRE-PAINT sheet is still on the page.
+//
+// early.css paints <html> #181a1b until content.js releases it by setting
+// data-dark-night-ready. A light site that leaves <body> transparent - very
+// common, most sites paint only their own containers - has nothing else for the
+// measurement to read, so if the release happens after the first measurement
+// the extension sees the pre-paint sheet's own dark colour, concludes the site
+// is already dark, and switches itself off on a white page.
+//
+// Reproduced faithfully: the real early.css, injected the way the service
+// worker registers it, before content.js loads.
+// ---------------------------------------------------------------------------
+async function earlyCssSuite() {
+  await waitUntil(() => !!window.__mm.settings);
+  await tick(60);
+
+  check("earlycss: the pre-paint sheet really is in effect during the read",
+    EARLY_CSS_TEXT.includes("data-dark-night-ready"), EARLY_CSS_TEXT.trim().split("\n").pop());
+  // The site's own declaration, not the computed value - once the theme is
+  // applied the computed background is the theme's, which says nothing about
+  // what the measurement had to work with.
+  check("earlycss: the body under test is transparent, as on a real site",
+    document.body.style.backgroundColor === "transparent", document.body.style.backgroundColor);
+
+  // The whole point: this page is LIGHT. It must be themed.
+  check("earlycss: light page is not mistaken for a dark one",
+    window.__mm.nativeDark === false, "nativeDark=" + window.__mm.nativeDark);
+  check("earlycss: light page is themed", !!styleEl());
+  check("earlycss: pre-paint sheet released", document.documentElement.hasAttribute(READY));
+
+  // And the release must not have been bought by delaying the theme: the sheet
+  // early.css exists to cover for has to be in place when it is released.
+  check("earlycss: theme was in place before the pre-paint sheet was released",
+    !!styleEl() && getComputedStyle(document.body).backgroundColor === DARK,
+    getComputedStyle(document.body).backgroundColor);
+
+  // A genuinely dark site with a transparent body still has to be recognised -
+  // the fix must not simply blind the fallback path.
+  document.documentElement.style.backgroundColor = "#101112";
+  await set({ autoSkipNativeDark: false });
+  await set({ autoSkipNativeDark: true });
+  await waitUntil(() => !styleEl());
+  check("earlycss: a real dark page with a transparent body still steps aside",
+    !styleEl() && window.__mm.nativeDark === true, "nativeDark=" + window.__mm.nativeDark);
+  document.documentElement.style.backgroundColor = "";
 }
 
 // ---------------------------------------------------------------------------
@@ -670,9 +735,11 @@ function $id(id) { return document.getElementById(id); }
     // The verdict is taken as soon as the settings read resolves, so the page
     // must already look dark when content.js loads.
     if (MODE === "nativedark") document.body.style.backgroundColor = "#111213";
+    if (MODE === "earlycss") await installEarlyCss();
     await loadContentScript();
     if (MODE === "pending") await pendingSuite();
     else if (MODE === "nativedark") await nativeDarkSuite();
+    else if (MODE === "earlycss") await earlyCssSuite();
     else await mainSuite();
   } catch (e) {
     check("harness ran without throwing", false, (e && e.message) + " " + (e && e.stack || "").split("\n")[1]);

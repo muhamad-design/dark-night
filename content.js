@@ -771,9 +771,15 @@ ${filterRule}
       pending = null;
     }
     applyTheme();
-    armDetection();
     // Releases the pre-paint stylesheet registered by the service worker.
+    // Strictly before detection is armed: early.css paints <html> dark, and on
+    // a page that is already past DOMContentLoaded - every tab open at install
+    // or re-enable time - the first measurement runs synchronously from
+    // armDetection(). A light site that leaves <body> transparent would have
+    // had nothing else to measure, so the engine read the pre-paint sheet's own
+    // colour and switched itself off on a white page.
     document.documentElement.setAttribute(READY_ATTR, "");
+    armDetection();
   });
 
   chrome.storage.onChanged.addListener((changes, area) => {

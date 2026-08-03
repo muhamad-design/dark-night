@@ -97,7 +97,10 @@ than showing a state that was never saved.
 stylesheets hide their rules - but "is this page rendering dark right now" is. Once the
 page has real styles (DOMContentLoaded, re-checked at 1s and 3s for late-hydrating SPAs),
 the content script lifts its own stylesheet, reads the page's background colour, and
-restores it - one synchronous task, so the unthemed frame is never painted. If the page
+restores it - one synchronous task, so the unthemed frame is never painted. The pre-paint
+sheet (`early.css`) is released *before* detection is armed: it paints `<html>` dark, and
+on a light site with a transparent `<body>` - which has nothing else to measure - the
+engine would otherwise read that colour and switch itself off on a white page. If the page
 measures dark (relative luminance, with `oklch`/`lab` and `color-scheme` fallbacks), the
 theme steps aside for that load and the popup says so.
 
@@ -179,6 +182,7 @@ python3 -m http.server 8765
 | `localhost:8765/test/harness.html` | 102 assertions: both engines, specificity, shadow DOM (including a real custom-element upgrade), frames, top layer, sliders, toggles, per-site rules, liveness-poll gating, self-heal, host matching |
 | `localhost:8765/test/harness.html?suite=pending` | A settings write landing between the initial storage read and its callback |
 | `localhost:8765/test/harness.html?suite=nativedark` | 28 assertions: the colour classifier, stepping aside on an already-dark page, the scheduled recheck catching a page that flips, `forcedSites` and the auto-skip toggle |
+| `localhost:8765/test/harness.html?suite=earlycss` | 8 assertions: detection against the **real** `early.css` on a light page with a transparent `<body>` - the pre-paint sheet must be released before the first measurement, or the engine reads its own dark colour and switches off on a white page |
 | `localhost:8765/test/perf-bench.html` | Style-resolution cost of the real dynamic sheet on a ~9,500-element DOM, and a guard on the specificity booster: it must stay cascade-identical to the chained form and beat it head-to-head |
 | `localhost:8765/test/popup-harness.html` | 77 assertions: the **built** React popup against a mocked `chrome`, including beUI component wiring, rejected writes, external changes, corrupt settings and the native-dark banner |
 | `localhost:8765/test/worker-harness.html` | 32 assertions: the real `background.js` driven as a black box against a mocked MV3 surface - registration lifecycle, badge clearing, tab adoption, the shortcut, host matching, corrupt storage |
