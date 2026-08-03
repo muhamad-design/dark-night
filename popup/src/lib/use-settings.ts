@@ -76,11 +76,16 @@ export function useSettings(): SettingsApi {
   // The content script's top-frame instance knows whether the page measured as
   // already dark. No script there (a chrome:// page, a fresh install before
   // adoption) leaves lastError set and the flag simply stays false.
-  const queryNativeDark = useCallback(() => {
-    if (tabId.current === null || !chrome.tabs?.sendMessage) return;
+  // onSettled fires once the answer is in (or is never coming), so the caller
+  // can gate the first paint on it - see the initial load below.
+  const queryNativeDark = useCallback((onSettled?: () => void) => {
+    if (tabId.current === null || !chrome.tabs?.sendMessage) {
+      onSettled?.();
+      return;
+    }
     chrome.tabs.sendMessage(tabId.current, { type: "dark-night:status" }, (resp) => {
-      if (chrome.runtime.lastError || !resp) return;
-      setNativeDark(!!resp.nativeDark);
+      if (!chrome.runtime.lastError && resp) setNativeDark(!!resp.nativeDark);
+      onSettled?.();
     });
   }, []);
 
@@ -142,24 +147,46 @@ export function useSettings(): SettingsApi {
     chrome.storage.sync.get(DEFAULTS, (stored) => {
       setSettings(sanitize(stored));
       chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+        let themable = false;
         try {
           const url = new URL(tab.url as string);
           if (url.protocol === "http:" || url.protocol === "https:") {
+            themable = true;
             setCurrentSite(url.hostname);
             tabId.current = tab.id ?? null;
-            queryNativeDark();
           }
         } catch {
           /* chrome:// pages, or site access withheld so tab.url is unreadable */
         }
-        loadedRef.current = true;
-        setLoaded(true);
-        // Replay anything that landed while the read was in flight.
-        if (pending.current) {
-          const replay = pending.current;
-          pending.current = null;
-          applyChanges(replay);
+
+        const finishLoad = () => {
+          loadedRef.current = true;
+          setLoaded(true);
+          // Replay anything that landed while the read was in flight.
+          if (pending.current) {
+            const replay = pending.current;
+            pending.current = null;
+            applyChanges(replay);
+          }
+        };
+
+        if (!themable) {
+          finishLoad();
+          return;
         }
+        // The native-dark answer has to be known before the first paint, not
+        // after: arriving once the popup is already on screen adds the banner
+        // below it, and every layout-tracked control further down visibly
+        // slides to follow. A content script that never answers must not
+        // block the popup forever, so it gets one chance before opening anyway.
+        let settled = false;
+        const settle = () => {
+          if (settled) return;
+          settled = true;
+          finishLoad();
+        };
+        queryNativeDark(settle);
+        setTimeout(settle, 200);
       });
     });
 

@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { Switch } from "@/components/motion/switch";
+import { Checkbox } from "@/components/motion/checkbox";
 import { Tabs, TabsList, TabsTrigger } from "@/components/motion/tabs";
 import { RangeSlider } from "@/components/motion/range-slider";
 import { Button } from "@/components/motion/button/base";
@@ -265,10 +266,10 @@ export default function App() {
         inert={off ? true : undefined}
       >
         <span className="text-xs text-foreground">Skip sites that are already dark</span>
-        <Switch
+        <Checkbox
           checked={settings.autoSkipNativeDark}
           onCheckedChange={(next) => save({ autoSkipNativeDark: next })}
-          ariaLabel="Skip sites that are already dark"
+          aria-label="Skip sites that are already dark"
         />
       </section>
 

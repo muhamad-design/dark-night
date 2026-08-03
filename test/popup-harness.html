@@ -369,14 +369,14 @@ async function run() {
   await waitFor(() => !!$("#nativeDarkNote"));
   check("nativedark: banner returns once the force is released", !!$("#nativeDarkNote"));
 
-  // --- the auto-skip switch --------------------------------------------------
-  const autoSwitch = $('#autoSkipRow [role="switch"]');
-  check("nativedark: auto-skip switch present with a name",
-    !!autoSwitch && !!autoSwitch.getAttribute("aria-label"),
-    autoSwitch && autoSwitch.getAttribute("aria-label"));
+  // --- the auto-skip checkbox -------------------------------------------------
+  const autoCheckbox = $('#autoSkipRow [role="checkbox"]');
+  check("nativedark: auto-skip checkbox present with a name",
+    !!autoCheckbox && !!autoCheckbox.getAttribute("aria-label"),
+    autoCheckbox && autoCheckbox.getAttribute("aria-label"));
   check("nativedark: auto-skip is on by default",
-    autoSwitch.getAttribute("aria-checked") === "true");
-  autoSwitch.click();
+    autoCheckbox.getAttribute("aria-checked") === "true");
+  autoCheckbox.click();
   await waitFor(() => store.autoSkipNativeDark === false);
   check("nativedark: toggling writes the setting", store.autoSkipNativeDark === false);
   await waitFor(() => !$("#nativeDarkNote"));
