@@ -6,6 +6,7 @@ popup/dist/
 *.tsbuildinfo
 .DS_Store
 
-# Session handoff / assistant notes - not for the public repo.
+# Session handoff / assistant notes and tooling config - not for the public repo.
 CLAUDE.md
 NEXT_SESSION.md
+.claude/

@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-/* Geist is beUI's typeface. Bundled rather than linked because MV3 forbids
+/* Geist is the popup's typeface. Bundled rather than linked because MV3 forbids
    remote resources, and vendored into the repo because node_modules is not
    committed. One variable file per family covers every weight the popup uses.
    SIL Open Font License 1.1 - see fonts/LICENSE.txt. */
@@ -21,9 +21,9 @@
 }
 
 /* ---------------------------------------------------------------------------
-   beUI theme, copied verbatim from beui.dev's own stylesheet so the popup and
-   the injected page theme use the identical palette. Do not "tidy" these
-   values - they are the source of truth, and content.js mirrors the dark set.
+   Theme tokens, copied verbatim so the popup and the injected page theme use
+   the identical palette. Do not "tidy" these values - they are the source of
+   truth, and content.js mirrors the dark set.
    --------------------------------------------------------------------------- */
 
 :root {
@@ -77,9 +77,9 @@
   --gradient-accent: linear-gradient(90deg, oklch(80% 0.18 195) 0%, oklch(72% 0.22 295));
 }
 
-/* Expose the tokens to Tailwind's utility generator, so beUI's own class names
-   (bg-card, text-muted-foreground, bg-primary, border-border, ring-ring ...)
-   resolve to the values above rather than to Tailwind's defaults. */
+/* Expose the tokens to Tailwind's utility generator, so the theme's own class
+   names (bg-card, text-muted-foreground, bg-primary, border-border, ring-ring
+   ...) resolve to the values above rather than to Tailwind's defaults. */
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);

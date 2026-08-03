@@ -117,9 +117,9 @@
       ? `
 html {
   filter: ${invert} !important;
-  /* Inverted, #eaeaea lands on #151515 - beUI's --background - so a filtered
-     page and the popup sit on exactly the same ground. Pure white would give
-     #000, which is darker than the rest of the theme. */
+  /* Inverted, #eaeaea lands on #151515 - the theme's --background - so a
+     filtered page and the popup sit on exactly the same ground. Pure white
+     would give #000, which is darker than the rest of the theme. */
   background-color: #eaeaea !important;
   min-height: 100vh;
 }
@@ -183,9 +183,9 @@ img:fullscreen, video:fullscreen, canvas:fullscreen, embed:fullscreen, object:fu
   // faster in 33 of 40 interleaved rounds. test/perf-bench.html measures this.
   const SP = ":not(#\\9#\\8#\\7)";
 
-  // beUI's dark tokens, copied from beui.dev's own stylesheet. popup/src/theme.css
-  // holds the identical set, so a themed page and the extension's own UI are the
-  // same palette. Change them in both places or not at all.
+  // The popup's dark tokens. popup/src/theme.css holds the identical set, so a
+  // themed page and the extension's own UI are the same palette. Change them
+  // in both places or not at all.
   const T = {
     background: "#151515", // --background
     card: "#1c1c1c", // --card, the raised surface

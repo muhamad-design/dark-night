@@ -217,7 +217,7 @@ export default function App() {
         >
           {/* TabsTrigger wraps its button in a positioning div, so the flex
               child is that wrapper, not the button. Widening the wrapper from
-              here keeps the vendored beUI component untouched. */}
+              here keeps the vendored component untouched. */}
           <TabsList className="flex w-full [&>div]:flex-1 [&>div]:basis-0">
             <TabsTrigger value="dynamic" className="w-full">
               Dynamic

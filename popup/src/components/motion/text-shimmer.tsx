@@ -12,10 +12,10 @@ export function TextShimmer({ children, as: Comp = "span", duration = 2.5, class
   return (
     <>
       <style>
-        {`@keyframes beui-text-shimmer{from{background-position:200% 0}to{background-position:-200% 0}}`}
+        {`@keyframes dn-text-shimmer{from{background-position:200% 0}to{background-position:-200% 0}}`}
       </style>
       <Comp
-        style={{ animation: `beui-text-shimmer ${duration}s linear infinite` }}
+        style={{ animation: `dn-text-shimmer ${duration}s linear infinite` }}
         className={cn(
           "inline-block bg-[length:200%_100%] bg-clip-text text-transparent",
           "bg-[linear-gradient(110deg,var(--muted-foreground)_30%,var(--foreground)_50%,var(--muted-foreground)_70%)]",

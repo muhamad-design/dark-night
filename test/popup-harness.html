@@ -19,7 +19,7 @@
 <script>
 // ---------------------------------------------------------------------------
 // Loads the BUILT popup (popup/dist) into an iframe with a mocked chrome API,
-// so the real React + beUI bundle is what gets asserted on. Run `npm run build`
+// so the real React popup bundle is what gets asserted on. Run `npm run build`
 // first - a stale bundle is the one failure mode that makes this suite lie.
 // ---------------------------------------------------------------------------
 const results = [];
@@ -150,10 +150,10 @@ async function run() {
   const CLEAN = { enabled: true, mode: "dynamic", brightness: 100, contrast: 100,
                   sepia: 0, grayscale: 0, disabledSites: [] };
 
-  // --- the bundle mounts and paints with the beUI theme ---------------------
+  // --- the bundle mounts and paints with the popup theme ---------------------
   await mount(CLEAN, "https://example.com/a");
   check("popup: React bundle mounted", !!$('[data-loaded="true"]'));
-  check("theme: beUI background token applied",
+  check("theme: background token applied",
     win.getComputedStyle(win.document.body).backgroundColor === "rgb(21, 21, 21)",
     win.getComputedStyle(win.document.body).backgroundColor);
   check("theme: html carries the dark class", win.document.documentElement.classList.contains("dark"));
@@ -199,7 +199,7 @@ async function run() {
     const ticks = $$(`[data-slider="${k}"] span.absolute`).length;
     check(`sliders: ${k} draws step ticks`, ticks > 1, ticks + " ticks");
   }
-  check("sliders: the step is coarse enough for beUI to draw ticks",
+  check("sliders: the step is coarse enough to draw ticks",
     Number(slider("brightness").getAttribute("aria-valuenow")) % 10 === 0,
     slider("brightness").getAttribute("aria-valuenow"));
 
@@ -207,12 +207,12 @@ async function run() {
   check("brand: header reads Dark Night", txt("header").includes("Dark Night"), txt("header"));
   check("brand: no MM left in the popup chrome", !txt("header").includes("MM"), txt("header"));
 
-  // --- beUI components are the real ones -----------------------------------
-  check("beUI: master control is a role=switch, not a checkbox", !!$('[role="switch"]'));
-  check("beUI: switch reflects stored state", $('[role="switch"]').getAttribute("aria-checked") === "true");
-  check("beUI: engine picker is a tablist", !!$('[role="tablist"]') && $$('[role="tab"]').length === 2);
-  check("beUI: sliders expose the slider role", $$('[role="slider"]').length === 4);
-  check("beUI: slider carries its value in aria",
+  // --- UI components are the real ones -----------------------------------
+  check("ui: master control is a role=switch, not a checkbox", !!$('[role="switch"]'));
+  check("ui: switch reflects stored state", $('[role="switch"]').getAttribute("aria-checked") === "true");
+  check("ui: engine picker is a tablist", !!$('[role="tablist"]') && $$('[role="tab"]').length === 2);
+  check("ui: sliders expose the slider role", $$('[role="slider"]').length === 4);
+  check("ui: slider carries its value in aria",
     slider("brightness").getAttribute("aria-valuenow") === "100",
     slider("brightness").getAttribute("aria-valuenow"));
 

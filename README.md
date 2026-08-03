@@ -1,7 +1,6 @@
 # Dark Night
 
-A Manifest V3 Chrome extension that applies a dark theme to any website, in the style of
-Dark Reader.
+A Manifest V3 Chrome extension that applies a dark theme to any website.
 
 ## Install
 
@@ -20,26 +19,23 @@ Re-run `npm run build` after any change under `popup/src/`. `npm run dev` rebuil
 there is no dev server, because MV3 forbids remote code and the extension always loads the
 built bundle.
 
-`test/`, `popup/src/` and `.claude/` are development-only; Chrome ignores them.
+`test/` and `popup/src/` are development-only; Chrome ignores them.
 
 ## Design system
 
-The UI follows [beUI](https://beui.dev) - the popup uses beUI's real components, pulled from
-its shadcn registry under the `@beui` namespace, not reimplementations:
+The popup is built from a small set of motion-driven components (`popup/src/components/motion/`) -
+not reimplementations bolted onto stock HTML elements:
 
-```bash
-npx shadcn@latest add @beui/switch @beui/tabs @beui/range-slider @beui/button-base
-```
-
-| Surface | beUI component |
+| Surface | Component |
 | --- | --- |
 | Master toggle | `Switch` - spring thumb, `stiffness 800 / damping 80 / mass 4`, squish on press |
 | Dynamic / Filter | `Tabs` (segment) - `layoutId` indicator on a `170 / 24 / 1.2` spring |
 | The four sliders | `RangeSlider` - `role="slider"`, tick dots per step, glide-tracked fill |
 | Site and reset actions | `Button` - press-scale feedback |
+| Skip sites that are already dark | `Checkbox` - draw-on checkmark, spring press |
 | Slow-load placeholder | `TextShimmer` - only if the settings read exceeds 120ms |
 
-The palette is beUI's own, copied verbatim from beui.dev's stylesheet rather than eyeballed.
+The palette is copied verbatim into the stylesheet rather than eyeballed.
 `popup/src/theme.css` holds the `:root` and `.dark` blocks; `content.js` mirrors the dark set
 in a `T` constant, so a themed web page and the extension's own UI are the same colours:
 
@@ -56,7 +52,7 @@ in a `T` constant, so a themed web page and the extension's own UI are the same 
 A test asserts the injected sheet contains *only* these values, so the two can never drift.
 In filter mode the root paints `#eaeaea`, which inverts to exactly `#151515`.
 
-Geist is beUI's typeface and is bundled - one variable file per family, vendored into
+Geist is the popup's typeface and is bundled - one variable file per family, vendored into
 `popup/src/fonts/` because MV3 forbids remote resources and `node_modules` is not committed.
 SIL Open Font License 1.1; the licence travels with the fonts.
 
@@ -68,7 +64,7 @@ SIL Open Font License 1.1; the licence travels with the fonts.
 | `Alt+Shift+D` | Same toggle, from the keyboard. |
 | Disable for this site | Per-site opt-out. Matches subdomains, and ignores a leading `www.` |
 | Dynamic / Filter | The two theming engines (below). |
-| Sliders | Brightness, contrast, sepia, grayscale - applied in both engines. Stepped in 10s, so beUI draws a tick per step (it stops drawing them past 50 steps, which a finer step would exceed). |
+| Sliders | Brightness, contrast, sepia, grayscale - applied in both engines. Stepped in 10s, so the slider draws a tick per step (it stops drawing them past 50 steps, which a finer step would exceed). |
 | Skip sites that are already dark | On by default. A page that is already rendering dark - its own toggle, a stored preference, a `prefers-color-scheme` theme - is left alone (below). |
 | Theme it anyway | Shown when the extension stepped aside on the current site; overrides the detection for that site permanently. `Step aside` undoes it. |
 | Excluded sites | The list at the bottom of the popup removes an opt-out without visiting the site. |
@@ -173,11 +169,11 @@ the `<html>` subtree, so the root filter never reached them and they stayed whit
 | `content.js` | Theme engine: builds the stylesheet, keeps it applied, reacts to setting changes |
 | `background.js` | Service worker: keyboard shortcut, pre-paint CSS registration, injection into open tabs |
 | `early.css` | Pre-paint dark background that prevents the white flash on page load |
-| `popup/src/` | Popup source: React app, beUI components, beUI theme |
+| `popup/src/` | Popup source: React app, motion-driven UI components, theme |
 | `popup/src/fonts/` | Geist variable fonts, vendored with their licence |
 | `popup/dist/` | Built popup - generated, git-ignored, what the manifest points at |
 | `vite.config.ts` | Build: React + Tailwind 4, relative asset paths for `chrome-extension://` |
-| `components.json` | shadcn registry config, so `@beui/*` resolves to beui.dev |
+| `components.json` | shadcn CLI config (aliases, Tailwind paths) for the popup's components |
 | `test/` | Test harnesses and visual test page |
 
 ## Tests
@@ -197,7 +193,7 @@ python3 -m http.server 8765
 | `localhost:8765/test/harness.html?suite=earlycss` | 8 assertions: detection against the **real** `early.css` on a light page with a transparent `<body>` - the pre-paint sheet must be released before the first measurement, or the engine reads its own dark colour and switches off on a white page |
 | `localhost:8765/test/harness.html?suite=hint` | 8 assertions: a remembered verdict seeds the load before the settings arrive, and a stale one is corrected by the measurement rather than believed |
 | `localhost:8765/test/perf-bench.html` | Style-resolution cost of the real dynamic sheet on a ~9,500-element DOM, and a guard on the specificity booster: it must stay cascade-identical to the chained form and beat it head-to-head |
-| `localhost:8765/test/popup-harness.html` | 83 assertions: the **built** React popup against a mocked `chrome`, including beUI component wiring, rejected writes, external changes, corrupt settings, and the native-dark banner with its parent-rule disclosure and policy re-query |
+| `localhost:8765/test/popup-harness.html` | 83 assertions: the **built** React popup against a mocked `chrome`, including UI component wiring, rejected writes, external changes, corrupt settings, and the native-dark banner with its parent-rule disclosure and policy re-query |
 | `localhost:8765/test/worker-harness.html` | 32 assertions: the real `background.js` driven as a black box against a mocked MV3 surface - registration lifecycle, badge clearing, tab adoption, the shortcut, host matching, corrupt storage |
 | `localhost:8765/test/test.html?mode=dynamic\|filter\|off` | Visual page with the layout patterns that commonly break dark-mode extensions |
 
@@ -222,7 +218,7 @@ confirm that.
 - **An `<embed>` or `<object>` *document* (a PDF) stays light in filter mode.** Both are
   treated as media so plugin and image content keeps its real colors. An `<iframe>` PDF is
   themed correctly.
-- **Dynamic mode uses a flat palette**, not Dark Reader's per-rule color analysis, so sites
+- **Dynamic mode uses a flat palette** rather than per-rule color analysis, so sites
   lose color hierarchy between surfaces. Non-table borders keep their original color, so
   some light dividers stay visible; remapping them correctly needs per-element computed
   style inspection, and a blanket `border-color` rule squares off CSS-triangle carets.

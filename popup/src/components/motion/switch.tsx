@@ -1,5 +1,4 @@
 "use client";
-// beui.dev/components/motion/switch
 
 import { animate, motion, MotionConfig, useReducedMotion } from "motion/react";
 import { useEffect, useId, useRef, useState } from "react";

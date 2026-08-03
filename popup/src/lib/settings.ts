@@ -38,8 +38,9 @@ export const RANGES: Record<SliderKey, [number, number]> = {
 };
 
 // Every range spans 100, so one step size gives all four sliders the same ten
-// intervals and the same tick spacing. beUI draws a tick per step and stops
-// drawing them past 50, so a fine step would silently render no ticks at all.
+// intervals and the same tick spacing. The slider draws a tick per step and
+// stops drawing them past 50, so a fine step would silently render no ticks
+// at all.
 export const STEPS: Record<SliderKey, number> = {
   brightness: 10,
   contrast: 10,

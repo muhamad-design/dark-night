@@ -194,17 +194,17 @@ function allRulesParse() {
   return { ok: parsed === declared, detail: parsed + " parsed / " + declared + " declared" };
 }
 
-// beUI dark tokens. Chrome reports oklch colours in their own space, so these
+// Theme dark tokens. Chrome reports oklch colours in their own space, so these
 // are the computed-style forms of --accent, --foreground and --background.
 const LINK = "oklch(0.8 0.18 195)";   // --accent
 const TEXT = "oklch(0.96 0 0)";       // --foreground
 const DARK = "rgb(21, 21, 21)";       // --background #151515
 const CARD = "rgb(28, 28, 28)";       // --card #1c1c1c
 
-// The palette is no longer monochrome - it is beUI's. What matters now is that
-// the injected sheet uses beUI's own token values and nothing else, so a themed
-// page and the popup cannot drift apart.
-const BEUI_TOKENS = {
+// The palette is no longer monochrome - it is the theme's. What matters now is
+// that the injected sheet uses the theme's own token values and nothing else,
+// so a themed page and the popup cannot drift apart.
+const THEME_TOKENS = {
   background: "#151515",
   card: "#1c1c1c",
   foreground: "oklch(96% 0 0)",
@@ -214,12 +214,12 @@ const BEUI_TOKENS = {
   violet: "oklch(68% 0.22 295)"
 };
 
-// Any colour literal in the sheet that is not one of beUI's tokens (or one of
-// the few mechanism colours that are not palette at all).
+// Any colour literal in the sheet that is not one of the theme's tokens (or
+// one of the few mechanism colours that are not palette at all).
 function offPalette(cssText) {
   const allowed = new Set([
-    ...Object.values(BEUI_TOKENS).map((v) => v.toLowerCase()),
-    "oklch(38% 0 0)",      // scrollbar thumb, beUI greyscale
+    ...Object.values(THEME_TOKENS).map((v) => v.toLowerCase()),
+    "oklch(38% 0 0)",      // scrollbar thumb, theme greyscale
     "#eaeaea",             // filter mode: inverts to #151515
     "rgba(0, 0, 0, 0.7)"   // elevation drop shadow
   ]);
@@ -410,7 +410,7 @@ async function nativeDarkSuite() {
   await set({ forcedSites: [host] });
   await waitUntil(() => !!styleEl());
   check("nativedark: forcing the site themes it anyway", !!styleEl());
-  check("nativedark: forced page renders the beUI theme", bodyBg() === DARK, bodyBg());
+  check("nativedark: forced page renders the dark theme", bodyBg() === DARK, bodyBg());
 
   await set({ forcedSites: [] });
   await waitUntil(() => !styleEl());
@@ -841,18 +841,18 @@ async function mainSuite() {
   const filCss = B0.buildFilterCss({ ...B0.DEFAULTS });
   const dynOff = offPalette(dynCss);
   const filOff = offPalette(filCss);
-  check("palette: dynamic engine uses only beUI tokens", dynOff.length === 0, dynOff.join(" "));
-  check("palette: filter engine uses only beUI tokens", filOff.length === 0, filOff.join(" "));
-  check("palette: surfaces are beUI background and card",
-    dynCss.includes(BEUI_TOKENS.background) && dynCss.includes(BEUI_TOKENS.card));
-  check("palette: links use the beUI accent", dynCss.includes(BEUI_TOKENS.accent));
+  check("palette: dynamic engine uses only theme tokens", dynOff.length === 0, dynOff.join(" "));
+  check("palette: filter engine uses only theme tokens", filOff.length === 0, filOff.join(" "));
+  check("palette: surfaces are the theme background and card",
+    dynCss.includes(THEME_TOKENS.background) && dynCss.includes(THEME_TOKENS.card));
+  check("palette: links use the theme accent", dynCss.includes(THEME_TOKENS.accent));
   check("palette: selection is accent on accent-foreground",
     /::selection \{[^}]*background-color: oklch\(80% 0\.18 195\)[^}]*color: #151515/.test(dynCss));
   // The popup ships the identical token set, so the two cannot drift.
   const themeCss = await (await fetch("../popup/src/theme.css?t=" + performance.now(), { cache: "no-store" })).text();
   const shared = ["#151515", "#1c1c1c", "oklch(96% 0 0)", "oklch(80% 0.18 195)", "#ffffff1a"];
   const missing = shared.filter((v) => !themeCss.includes(v));
-  check("palette: popup theme declares the same beUI tokens", missing.length === 0, missing.join(" "));
+  check("palette: popup theme declares the same theme tokens", missing.length === 0, missing.join(" "));
 
   // --- builders ---
   const B = window.__mm;
