@@ -194,7 +194,9 @@ that is see-through in *any* of those notations is "cannot tell", not dark - a f
 black switched the engine off on a white page.
 
 Only the top frame measures; subframes follow its verdict over `postMessage`, because in
-filter mode a subframe's CSS assumes the top frame's filter exists and frames must agree.
+filter mode a subframe's CSS compensates for the top frame's filter and frames must agree.
+The same message carries what the top frame is painting the page with - see
+[Frames](#frames) - and is re-sent whenever that could have moved.
 
 The verdict is never a stored *decision* - nothing is written to the exclusion list, so a
 site that later drops its dark theme is themed again automatically. It is remembered as a
@@ -228,12 +230,7 @@ does not cross a shadow boundary and `background-color` does not inherit. Withou
 component-based apps kept their light surfaces.
 
 Every frame emits this sheet, with one exception: the slider filter on `<html>` is emitted
-only in the top frame. A filter on `<html>` rasterises the whole subtree, and an iframe's
-painted output is part of that subtree, so a subframe emitting its own copy had the sliders
-applied twice - brightness 130 landing on 169, and compounding again per nesting level.
-Filter mode has always gated its root rule this way. The media reversal is *not* gated, and
-must not be: the top frame's filter still reaches a subframe's media, so it still needs the
-same single reversal.
+only in the top frame - see [Frames](#frames).
 
 **Filter** applies `invert(1) hue-rotate(180deg)` to the page and re-inverts images, video
 and embedded content so photos keep their real colors. It handles any site uniformly but is
@@ -244,8 +241,8 @@ Two things are deliberately *not* re-inverted:
 - **iframes.** The top frame's filter already inverts every subframe's painted output, so
   re-inverting the element cancelled it out and any frame the content script cannot enter
   (sandboxed without `allow-scripts`, an injection that failed) rendered as a bright white
-  box. Subframes now apply only their own media re-inversion, which also stops the sliders
-  compounding once per nesting level.
+  box. A subframe re-inverts only its own media, and only against the top frame's filter -
+  see [Frames](#frames).
 - **canvas.** A canvas is as often an application surface - a spreadsheet grid, a document
   view, a whiteboard - as it is a picture, and re-inverting it left those apps white on an
   otherwise dark page.
@@ -254,6 +251,50 @@ Filter mode also pins `color-scheme: light`, so a site that would otherwise serv
 dark theme serves the light one this engine is built to invert, and gives top-layer elements
 (modal dialogs, open popovers, fullscreen) their own filter pass - they are painted outside
 the `<html>` subtree, so the root filter never reached them and they stayed white.
+
+## Frames
+
+A page is a tree of documents and the content script runs in every one of them, so both
+engines split their sheet in two: the rules a frame paints for itself, and the rules that
+exist only to compensate for a filter an *ancestor* is applying.
+
+**Painted per frame.** The dynamic palette - backgrounds, text, links, controls, states.
+Each frame paints its own, which is what a self-theming cross-origin embed needs.
+
+**Emitted only in the top frame.** The root filter: `invert(1) hue-rotate(180deg)` in filter
+mode, the sliders in dynamic mode. A filter on `<html>` rasterises the whole subtree and an
+iframe's painted output is part of that subtree, so a subframe emitting its own copy applied
+it twice - brightness 130 landing on 169, compounding again per nesting level.
+
+**Compensation, emitted only against a filter that is genuinely there.** The media reversal
+(and, in filter mode, `color-scheme: light`, which is what gives the inversion a light source
+to work on). These are the exact reverse of the root filter, so they are correct only while
+an ancestor really is applying it, with the same values. A subframe cannot check that:
+
+- the top document may not be running this script at all - a `file://` page with "Allow
+  access to file URLs" off, another extension's page, anything Chrome declines - while an
+  `http(s)` iframe inside it is injected normally;
+- `HOST` is read from `location.ancestorOrigins`, which Blink serialises as the literal
+  string `"null"` for an opaque origin (a top document sandboxed by CSP, an `about:blank`
+  opened via `window.open`). `new URL("null")` throws and the subframe silently falls back to
+  its *own* hostname, so it can disagree with the top frame about the exclusion list, the
+  per-site theme and even which engine to run.
+
+So it is told rather than assumed. The `postMessage` channel that already carries the
+native-dark verdict carries the top frame's applied filter with it - engine, sliders and
+`themeImages` - re-sent on every change; the subframe rebuilds its sheet on receipt and
+reverses *that*, not its own settings. Until it hears, and forever if nobody answers, it
+reverses nothing: missing compensation costs media one round trip of looking like
+"theme images", while unpaired compensation is a colour negative that never corrects itself.
+The values arrive over a channel any page script can post to and end up in a stylesheet, so
+they are rebuilt as numbers in range rather than trusted.
+
+A **fenced frame** is the case that looks like a top frame and is not: `window.top === window`
+is true and `ancestorOrigins` is empty, because it roots its own frame tree - but it is still
+painted into the embedding page, so the embedder's root filter rasterises it like any iframe.
+It is identified by `window.fence`, which is `null` in every other document, and treated as
+the subframe it visually is. It can never be told what it is sitting inside, by design, so it
+compensates for nothing.
 
 ## Files
 
@@ -281,8 +322,10 @@ python3 -m http.server 8765
 
 | URL | Covers |
 | --- | --- |
-| `localhost:8765/test/harness.html` | 131 assertions: both engines, specificity, shadow DOM (including a real custom-element upgrade), frames, top layer, sliders, toggles, per-site rules and per-site themes, which rules a subframe emits and which it leaves to the top frame, liveness-poll gating, self-heal, host matching - and the media reversal, checked as arithmetic: the filter functions are re-implemented as affine maps and the composed chain must land on the identity |
-| `localhost:8765/test/harness.html?suite=pending` | A settings write landing between the initial storage read and its callback |
+| `localhost:8765/test/harness.html` | 155 assertions: both engines, specificity, shadow DOM (including a real custom-element upgrade), frames, top layer, sliders, toggles, per-site rules and per-site themes, which rules a subframe emits and which it leaves to the top frame, what a frame reports to the frames inside it, the sanitising of that report, liveness-poll gating, self-heal, host matching - and the media reversal, checked as arithmetic: the filter functions are re-implemented as affine maps and the composed chain must land on the identity, against this frame's own filter and against an ancestor's |
+| `localhost:8765/test/harness.html?suite=frames` | 17 assertions: a **real** subframe running the real `content.js` under a top frame running it too. The top frame's engine and sliders reach it over `postMessage`, it re-renders its sheet on receipt, and its media carries the reverse of what the top frame applied - including when the two frames' own settings disagree, which is what an opaque-origin top document produces |
+| `localhost:8765/test/harness.html?suite=orphan` | 9 assertions: the same subframe with **no** extension in the top document, which is what Chrome does with a `file://` or other-extension page around an `http(s)` frame. Nothing answers, so the frame themes itself and compensates for nothing - no lone re-invert, no `color-scheme: light` |
+| `localhost:8765/test/harness.html?suite=pending` | 6 assertions: a settings write landing between the initial storage read and its callback |
 | `localhost:8765/test/harness.html?suite=nativedark` | 43 assertions: the colour classifier across every notation and its alpha handling, stepping aside on an already-dark page, the scheduled recheck catching a page that flips, `forcedSites`, the auto-skip toggle, and what gets remembered |
 | `localhost:8765/test/harness.html?suite=earlycss` | 8 assertions: detection against the **real** `early.css` on a light page with a transparent `<body>` - the pre-paint sheet must be released before the first measurement, or the engine reads its own dark colour and switches off on a white page |
 | `localhost:8765/test/harness.html?suite=hint` | 8 assertions: a remembered verdict seeds the load before the settings arrive, and a stale one is corrected by the measurement rather than believed |

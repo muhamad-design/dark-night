@@ -43,9 +43,18 @@
   // Only the top frame paints the page-wide filter in filter mode; a subframe
   // is already inside the top frame's filtered output. Cannot change without a
   // navigation, so resolve it once.
+  //
+  // A fenced frame answers `window.top === window` with itself and carries an
+  // empty ancestorOrigins - it is the root of its own frame tree - yet it is
+  // still painted into the embedding page, so the embedder's root filter
+  // rasterises it exactly like an iframe. Taken at face value it would have
+  // applied a second root filter inside the first, which is the doubling the
+  // gate exists to prevent. window.fence is the one thing that tells them
+  // apart: a Fence object inside a fenced frame tree, null everywhere else, and
+  // read here from the isolated world, where the page cannot forge it.
   const IS_TOP = (() => {
     try {
-      return window.top === window;
+      return window.top === window && !window.fence;
     } catch (e) {
       return false; // cross-origin ancestor - we are definitely not the top
     }
@@ -94,6 +103,27 @@
     const own = s.siteOverrides ? s.siteOverrides[HOST] : null;
     return own && typeof own === "object" ? { ...s, ...own } : s;
   }
+
+  // The forward filter an ancestor is painting THIS frame with, as the top
+  // frame reported it, or null for "nothing above is filtering".
+  //
+  // A subframe cannot work this out for itself, and used to assume it. Two ways
+  // the assumption is wrong, both reachable: the top document may not be
+  // running this script at all - a file:// page without file access, another
+  // extension's page, anything Chrome refuses - while an http(s) subframe of it
+  // is; and HOST is read from ancestorOrigins, which Blink serialises as the
+  // literal string "null" for an opaque origin (a top document sandboxed by
+  // CSP, an about:blank opened by window.open), so the subframe silently
+  // resolves its OWN host and can disagree with the top about every per-site
+  // answer, the engine included. Either way the frame emitted a reversal for a
+  // filter that was not there - a colour negative in filter mode, crushed
+  // images in dynamic mode.
+  //
+  // So it is told rather than assumed, and null until it is: a missing reversal
+  // costs one round trip of media carrying the page filter, which is exactly
+  // what "theme images" looks like, while an unpaired one is a visible defect
+  // that never corrects itself.
+  let ancestorFilter = null;
 
   function cssFilterValue(s, withInvert) {
     const parts = [];
@@ -145,6 +175,22 @@
     return parts.join(" ");
   }
 
+  // The reversal media has to carry to come back out of a forward filter
+  // unchanged. `applied` is the filter that is actually reaching this frame's
+  // pixels - this frame's own settings in the top frame, an ancestor's in a
+  // subframe - so its sliders say what to undo and its `themeImages` whether
+  // media was meant to be exempt at all. `inverting` says whether that chain
+  // included the invert pair.
+  //
+  // A null `applied` is the whole point of the argument: with nothing filtering
+  // this frame, media needs nothing. A reversal emitted there is not a harmless
+  // no-op, it is the reversal applied on its own.
+  function mediaUndo(applied, inverting) {
+    if (!applied || applied.themeImages) return "";
+    const undo = undoFilterValue(applied);
+    return inverting ? `${undo} invert(1) hue-rotate(180deg)`.trim() : undo;
+  }
+
   // Media is re-inverted so photos and video keep their real colours. Only
   // elements that paint the media themselves are listed - matching a wrapper
   // such as <picture> would invert its <img> a second time.
@@ -173,7 +219,19 @@
   // filter like every other pixel: an inverted screenshot or diagram is exactly
   // what that setting is for, and an inverted photograph is the reason it is
   // off until asked for.
-  function buildFilterCss(s, isTop = IS_TOP) {
+  function buildFilterCss(s, isTop = IS_TOP, ancestor = ancestorFilter) {
+    // The forward filter this frame's pixels actually carry: this engine's own
+    // invert chain in the top frame, an ancestor's in a subframe.
+    //
+    // Everything a subframe emits in this engine is compensation for an
+    // ancestor INVERSION - pinning color-scheme light is what gives that
+    // inversion a light source to work on, and the media rule is what takes it
+    // back off photos. With nothing above inverting, every one of those rules
+    // is unpaired: color-scheme light forces a site's light theme with nothing
+    // to invert it, and the media rule renders every photo as a colour
+    // negative. So the frame emits nothing at all rather than half a pair.
+    const applied = isTop ? s : ancestor;
+    if (!isTop && (!applied || applied.mode !== "filter")) return "";
     const invert = cssFilterValue(s, true);
     const root = isTop
       ? `
@@ -208,7 +266,12 @@ html {
     // frame by the time it reaches media, so undoing it here is what keeps a
     // photo looking like the photo. Dropped entirely when the theme is meant to
     // reach media, which leaves it carrying the root filter like anything else.
-    const undo = s.themeImages ? "" : `${undoFilterValue(s)} invert(1) hue-rotate(180deg)`.trim();
+    //
+    // Built from the filter that is actually applied, not from this frame's own
+    // settings: in a subframe those are the same values only while the top
+    // frame resolved the same host, and the reversal is worthless unless it is
+    // the exact reverse of what was applied.
+    const undo = mediaUndo(applied, true);
     const media = undo
       ? `
 img, video, embed, object {
@@ -220,9 +283,10 @@ img, video, embed, object {
     // nothing at all there - carrying the reverse alone would render it as a
     // colour negative - and themed media needs the whole treatment applied
     // directly, since nothing above it will.
-    const fullscreenMedia = s.themeImages ? cssFilterValue(s, true) : "none";
-    // Emitted in every frame, not just the top one: a self-theming cross-origin
-    // embed would otherwise serve its own dark theme and get inverted white.
+    const fullscreenMedia = applied.themeImages ? cssFilterValue(applied, true) : "none";
+    // Emitted in every frame that an inversion actually reaches, not just the
+    // top one: a self-theming cross-origin embed would otherwise serve its own
+    // dark theme and get inverted white.
     return `
 :root {
   /* A site that honours prefers-color-scheme would otherwise serve its own dark
@@ -272,17 +336,12 @@ img:fullscreen, video:fullscreen, canvas:fullscreen, embed:fullscreen, object:fu
     scrollThumb: "oklch(38% 0 0)"
   };
 
-  function buildDynamicCss(s, isTop = IS_TOP) {
+  function buildDynamicCss(s, isTop = IS_TOP, ancestor = ancestorFilter) {
     const extra = cssFilterValue(s, false);
     // Top frame only, for the same reason filter mode gates its root rule: a
     // filter on <html> rasterises the whole subtree, and an iframe's painted
     // output is part of that subtree, so a subframe emitting its own copy had
     // the sliders applied twice - brightness 130 landed on 169.
-    //
-    // Safe because every frame of a page agrees on whether to theme and how:
-    // HOST is the top frame's, the native-dark verdict is broadcast down from
-    // it, and effective() keys on that same host, so a themed subframe is
-    // always already inside a top frame carrying these exact sliders.
     const filterRule = extra && isTop ? `html${SP} { filter: ${extra} !important; }` : "";
     // This engine never inverts, so the only thing that reaches media is the
     // slider filter on <html> - which is exactly what washed a photograph out
@@ -291,12 +350,14 @@ img:fullscreen, video:fullscreen, canvas:fullscreen, embed:fullscreen, object:fu
     // undo, so no rule is emitted and no image pays for a filter it does not
     // need.
     //
-    // Emitted in every frame, unlike the root rule above: the top frame's
-    // filter rasterises a subframe's painted output too, so media in there is
+    // A subframe emits it too, unlike the root rule above: the top frame's
+    // filter rasterises a subframe's painted output, so media in there is
     // adjusted by it and needs the same reversal to come back out true to
-    // colour. Reversing once against a filter applied twice is what left one
-    // copy of the adjustment on every image inside an iframe.
-    const undo = s.themeImages ? "" : undoFilterValue(s);
+    // colour. Which filter, though, is the top frame's to say and not this
+    // frame's to guess - down to whether it inverts at all, since a top frame
+    // running the other engine still filters this one's pixels.
+    const applied = isTop ? s : ancestor;
+    const undo = mediaUndo(applied, !isTop && !!applied && applied.mode === "filter");
     const mediaRule = undo
       ? `
 img${SP}, video${SP}, embed${SP}, object${SP} {
@@ -593,11 +654,13 @@ ${filterRule}${mediaRule}
   // prefers light and the site only goes dark via prefers-color-scheme, the
   // page really is rendering light and theming it is the correct outcome.
   //
-  // Only the top frame measures. In filter mode a subframe's CSS assumes the
-  // ancestor filter exists, so frames must agree on one verdict; the top hands
-  // it out over postMessage. Page JS shares the window and could spoof either
+  // Only the top frame measures, and the same channel carries two things a
+  // subframe cannot answer for itself: the verdict, and what the top frame is
+  // painting the page with. Page JS shares the window and could spoof either
   // message, but all that buys it is flipping the theme in its own iframes,
-  // which the page could do to itself anyway.
+  // which the page could do to itself anyway - and the numbers it could send
+  // are rebuilt in readAncestorFilter rather than trusted, because those do
+  // reach a stylesheet.
   // --------------------------------------------------------------------------
   const DETECT_RECHECKS = [1000, 3000]; // SPAs restyle after hydration
   const MSG_QUERY = "dark-night:verdict?";
@@ -610,6 +673,71 @@ ${filterRule}${mediaRule}
 
   function steppedAside(s) {
     return nativeDark && s.autoSkipNativeDark && !siteForced(s);
+  }
+
+  // Top frame: the forward filter this frame is painting its whole subtree
+  // with, as the frames inside it need to see it, or null when it is painting
+  // none. Dynamic mode at default sliders emits no root rule at all, so there
+  // is nothing below it to reverse and it reports null too.
+  function appliedFilter() {
+    if (!settings) return null;
+    if (!settings.enabled || siteDisabled(settings) || steppedAside(settings)) return null;
+    const v = effective(settings);
+    if (v.mode !== "filter" && !cssFilterValue(v, false)) return null;
+    return {
+      mode: v.mode === "filter" ? "filter" : "dynamic",
+      brightness: v.brightness,
+      contrast: v.contrast,
+      sepia: v.sepia,
+      grayscale: v.grayscale,
+      themeImages: !!v.themeImages
+    };
+  }
+
+  // Subframe: the same value, rebuilt from whatever arrived rather than taken
+  // as sent. The channel is a window message, so any script on the page can
+  // post one, and these numbers are printed straight into this frame's
+  // stylesheet - a string that survived would close the declaration and let a
+  // page write rules into a cross-origin subframe, which is a great deal more
+  // than the theme-flipping the channel already tolerates.
+  function readAncestorFilter(f) {
+    if (!f || typeof f !== "object") return null;
+    // Out of range or not a number at all (NaN fails both comparisons) falls
+    // back to the neutral value, which contributes nothing to the reversal.
+    const num = (v, lo, hi, dflt) => (typeof v === "number" && v >= lo && v <= hi ? v : dflt);
+    return {
+      mode: f.mode === "filter" ? "filter" : "dynamic",
+      brightness: num(f.brightness, 50, 150, 100),
+      contrast: num(f.contrast, 50, 150, 100),
+      sepia: num(f.sepia, 0, 100, 0),
+      grayscale: num(f.grayscale, 0, 100, 0),
+      themeImages: f.themeImages === true
+    };
+  }
+
+  function currentVerdict() {
+    return { type: MSG_VERDICT, dark: nativeDark, filter: appliedFilter() };
+  }
+
+  // Sent whenever what a subframe is compensating for could have moved, which
+  // is every applyTheme in the top frame: the verdict changing, the settings
+  // changing, this site being excluded or force-themed, the remembered hint
+  // landing. Deduplicated, because most of those leave the answer identical.
+  let lastBroadcast = "";
+
+  function broadcast() {
+    if (!IS_TOP) return;
+    const msg = currentVerdict();
+    const key = JSON.stringify(msg);
+    if (key === lastBroadcast) return;
+    lastBroadcast = key;
+    for (const w of childFrames) {
+      try {
+        w.postMessage(msg, "*");
+      } catch (e) {
+        /* frame navigated away */
+      }
+    }
   }
 
   // Relative luminance, sRGB components in 0..1.
@@ -738,28 +866,14 @@ ${filterRule}${mediaRule}
     if (worth) rememberVerdict(verdict);
     if (verdict === nativeDark) return;
     nativeDark = verdict;
+    // Carries the new verdict down to the subframes, along with whatever it did
+    // to what this frame is painting them with.
     applyTheme();
-    for (const w of childFrames) {
-      try {
-        w.postMessage({ type: MSG_VERDICT, dark: nativeDark }, "*");
-      } catch (e) {
-        /* frame navigated away */
-      }
-    }
   }
 
   function armDetection() {
-    if (detectionArmed) return;
+    if (!IS_TOP || detectionArmed) return;
     detectionArmed = true;
-    if (!IS_TOP) {
-      // Ask once; the top answers immediately and again on every change.
-      try {
-        window.top.postMessage(MSG_QUERY, "*");
-      } catch (e) {
-        /* detached frame */
-      }
-      return;
-    }
     const kickoff = () => {
       checkNativeDark();
       for (const delay of DETECT_RECHECKS) detectTimers.push(setTimeout(checkNativeDark, delay));
@@ -778,8 +892,13 @@ ${filterRule}${mediaRule}
     window.addEventListener("message", (e) => {
       if (e.data !== MSG_QUERY || !e.source || e.source === window) return;
       if (!childFrames.includes(e.source)) childFrames.push(e.source);
+      // Answered directly rather than through broadcast(): this frame has heard
+      // nothing yet, whether or not the answer has changed since the last one
+      // went out. That is also the whole of the fix for a frame that asks
+      // before this one has settings or a hint - it gets the state as it stands
+      // now, and the next applyTheme corrects it.
       try {
-        e.source.postMessage({ type: MSG_VERDICT, dark: nativeDark }, "*");
+        e.source.postMessage(currentVerdict(), "*");
       } catch (err) {
         /* frame navigated away */
       }
@@ -789,10 +908,25 @@ ${filterRule}${mediaRule}
       if (e.source !== window.top) return;
       const d = e.data;
       if (!d || d.type !== MSG_VERDICT || typeof d.dark !== "boolean") return;
-      if (d.dark === nativeDark) return;
+      const filter = readAncestorFilter(d.filter);
+      const same =
+        d.dark === nativeDark && JSON.stringify(filter) === JSON.stringify(ancestorFilter);
+      if (same) return;
       nativeDark = d.dark;
+      ancestorFilter = filter;
+      // Re-renders the sheet: the media rule is built from what arrived here,
+      // so a frame that has just learnt what it is sitting inside has to build
+      // it again.
       if (settings) applyTheme();
     });
+    // Asked at script start rather than after the settings read, so the round
+    // trip overlaps that read instead of following it: until the answer lands
+    // this frame assumes nothing is filtering it and leaves its media alone.
+    try {
+      window.top.postMessage(MSG_QUERY, "*");
+    } catch (e) {
+      /* detached frame */
+    }
   }
 
   // The popup asks whether this page was measured as already dark, so it can
@@ -809,6 +943,12 @@ ${filterRule}${mediaRule}
 
   function applyTheme() {
     if (!settings) return;
+    // Every route by which this frame's own answer can move ends here - the
+    // settings read, a settings change, a fresh verdict, the remembered hint -
+    // so this is the one place the frames inside it have to be told. Ahead of
+    // the work below because it reads the same state that decides it, and a
+    // no-op in a subframe and whenever the answer has not actually moved.
+    broadcast();
     const active = settings.enabled && !siteDisabled(settings) && !steppedAside(settings);
     let style = document.getElementById(STYLE_ID);
 

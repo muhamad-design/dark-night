@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Dark Night subframe under test</title>
+  <style>body { margin: 0; font: 11px/1.4 ui-monospace, Menlo, monospace; }</style>
+</head>
+<body>
+  <p>subframe</p>
+  <img id="pic" alt="" width="8" height="8" />
+
+<script>
+// ---------------------------------------------------------------------------
+// A real subframe running the real content.js, driven from the harness in the
+// parent. Nothing is asserted here: the frame only reports what it built, so
+// both frame suites - one whose top frame runs the extension and one whose top
+// frame does not - check the same things against the same reporter.
+//
+// The two frames really are separate documents, which is the point: the media
+// reversal is only correct while an ancestor is applying the forward filter,
+// and that is not a fact a subframe can read off its own settings.
+// ---------------------------------------------------------------------------
+const store = {};
+const changeListeners = [];
+
+window.chrome = {
+  runtime: { id: "dark-night-test", lastError: null, onMessage: { addListener() {} } },
+  storage: {
+    sync: {
+      get(defaults, cb) {
+        setTimeout(() => cb({ ...defaults, ...store }), 0);
+      },
+      set(patch, cb) {
+        const changes = {};
+        for (const [k, v] of Object.entries(patch)) {
+          changes[k] = { oldValue: store[k], newValue: v };
+          store[k] = v;
+        }
+        setTimeout(() => {
+          changeListeners.forEach((fn) => fn(changes, "sync"));
+          if (cb) cb();
+        }, 0);
+      }
+    },
+    // Only the top frame reads the remembered verdict, so nothing in here
+    // should ever be touched - present so that a frame which did touch it would
+    // report the same as one that did not, rather than throwing.
+    local: {
+      get(defaults, cb) { setTimeout(() => cb({ ...defaults }), 0); },
+      set(patch, cb) { if (cb) cb(); }
+    },
+    onChanged: { addListener(fn) { changeListeners.push(fn); } }
+  }
+};
+
+async function loadContentScript() {
+  const src = await (await fetch("../content.js?frame&t=" + performance.now(), { cache: "no-store" })).text();
+  const marker = /\}\)\(\);\s*$/;
+  if (!marker.test(src)) throw new Error("content.js does not end in the expected IIFE form");
+  new Function(src.replace(marker,
+    `  window.__mm = {
+       IS_TOP,
+       get settings() { return settings; },
+       get nativeDark() { return nativeDark; },
+       get ancestorFilter() { return ancestorFilter; }
+     };
+   })();`
+  ))();
+}
+
+function snapshot() {
+  const el = document.getElementById("dark-night-style");
+  return {
+    type: "frame:state",
+    isTop: window.__mm.IS_TOP,
+    css: el ? el.textContent : null,
+    // The end of the chain: what a real <img> in this frame actually carries.
+    picFilter: getComputedStyle(document.getElementById("pic")).filter,
+    ancestor: window.__mm.ancestorFilter,
+    nativeDark: window.__mm.nativeDark
+  };
+}
+
+// chrome.storage.sync is one store shared by every frame, so a settings change
+// the parent makes has to land here too. Routed over the same channel rather
+// than a second mock, so the ordering between "the top re-rendered" and "this
+// frame re-rendered" is the ordering the browser would produce.
+window.addEventListener("message", (e) => {
+  const d = e.data;
+  if (!d || typeof d !== "object" || typeof d.type !== "string") return;
+  if (d.type === "frame:set") chrome.storage.sync.set(d.patch);
+  else if (d.type === "frame:report") parent.postMessage(snapshot(), "*");
+});
+
+(async () => {
+  await loadContentScript();
+  const t0 = performance.now();
+  while (!window.__mm.settings && performance.now() - t0 < 5000) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  parent.postMessage({ type: "frame:ready" }, "*");
+})();
+</script>
+</body>
+</html>

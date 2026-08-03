@@ -254,13 +254,15 @@ async function loadContentScript() {
   new Function(src.replace(marker,
     `  window.__mm = {
        buildCss, buildDynamicCss, buildFilterCss, cssFilterValue,
-       undoFilterValue, effective,
+       undoFilterValue, effective, mediaUndo,
        siteDisabled, HOST, DEFAULTS, READY_ATTR, SP, colorIsDark,
        checkNativeDark, detectTimers,
+       appliedFilter, readAncestorFilter, IS_TOP,
        get settings() { return settings; },
        get observer() { return observer; },
        get deadCheck() { return deadCheck; },
-       get nativeDark() { return nativeDark; }
+       get nativeDark() { return nativeDark; },
+       get ancestorFilter() { return ancestorFilter; }
      };
    })();`
   ))();
@@ -747,23 +749,33 @@ async function mainSuite() {
     /video:fullscreen[^{]*\{[^}]*filter: none/.test(bare()));
   check("filter: :fullscreen media reset is its own rule",
     !/video:fullscreen[^{]*\{[^}]*invert/.test(bare()));
-  // a subframe sits inside the top frame's filtered output already
+  // a subframe sits inside the top frame's filtered output already - when there
+  // IS one. What the top frame is painting the page with is the third argument
+  // to both builders now; ancestorOf() is what the top frame reports.
+  const ancestorOf = (s, mode) => ({
+    mode: mode || s.mode, brightness: s.brightness, contrast: s.contrast,
+    sepia: s.sepia, grayscale: s.grayscale, themeImages: s.themeImages
+  });
+  const FILTER_TOP = ancestorOf(window.__mm.DEFAULTS, "filter");
+  const subFilter = (patch, anc) =>
+    window.__mm.buildFilterCss({ ...window.__mm.DEFAULTS, ...patch }, false,
+      anc === undefined ? FILTER_TOP : anc);
   // regression: a self-theming cross-origin embed served its own dark theme and
   // the top frame's filter turned it white
   check("filter: color-scheme is pinned in subframes too",
-    /color-scheme: light/.test(window.__mm.buildFilterCss({ ...window.__mm.DEFAULTS }, false)));
-  check("filter: subframe gets no root filter", !/html \{/.test(window.__mm.buildFilterCss({ ...window.__mm.DEFAULTS }, false)),
-    norm(window.__mm.buildFilterCss({ ...window.__mm.DEFAULTS }, false)));
+    /color-scheme: light/.test(subFilter({})));
+  check("filter: subframe gets no root filter", !/html \{/.test(subFilter({})),
+    norm(subFilter({})));
   check("filter: subframe still re-inverts its own media",
-    /img, video, embed, object/.test(window.__mm.buildFilterCss({ ...window.__mm.DEFAULTS }, false)));
+    /img, video, embed, object/.test(subFilter({})));
   // The ROOT filter is what must not be applied twice. A subframe's media rule
   // does still carry slider values, and has to: the top frame's filter
   // rasterises the subframe's painted output too, so media in there is adjusted
   // by it and needs the same reversal to come back out true to colour.
   check("filter: the root slider filter applies once, in the top frame only",
     !/html[^{]*\{[^}]*brightness/.test(
-      window.__mm.buildFilterCss({ ...window.__mm.DEFAULTS, brightness: 70 }, false)),
-    norm(window.__mm.buildFilterCss({ ...window.__mm.DEFAULTS, brightness: 70 }, false)));
+      subFilter({ brightness: 70 }, ancestorOf({ ...window.__mm.DEFAULTS, brightness: 70 }, "filter"))),
+    norm(subFilter({ brightness: 70 }, ancestorOf({ ...window.__mm.DEFAULTS, brightness: 70 }, "filter"))));
   // regression: <picture> wrapper triple-inverted its <img> into a negative
   check("filter: picture wrapper not in re-invert list", !/^img[^{]*picture/m.test(css()),
     norm(css().split("\n").find((l) => l.startsWith("img")) || ""));
@@ -918,7 +930,9 @@ async function mainSuite() {
   // `html, body { background-color }` and `html { scrollbar-color }`, and prose
   // that mentions <html> by name.
   const rootFilter = (css) => (css.match(/^html[^,{\n]*\{ filter:[^\n]*/m) || [""])[0];
-  const dynSub = B.buildDynamicCss({ ...B.DEFAULTS, brightness: 130, contrast: 80 }, false);
+  const TUNED = { ...B.DEFAULTS, brightness: 130, contrast: 80 };
+  const DYN_TOP = ancestorOf(TUNED, "dynamic");
+  const dynSub = B.buildDynamicCss(TUNED, false, DYN_TOP);
   check("frames: the top frame carries the root slider filter",
     !!rootFilter(dynTuned), norm(rootFilter(dynTuned)));
   check("frames: the root slider filter applies once, in the top frame only",
@@ -936,6 +950,111 @@ async function mainSuite() {
   check("frames: the root filter is the only rule a subframe drops",
     norm(dynSub) === norm(dynTuned.replace(rootFilter(dynTuned), "")),
     "dropped: " + (dropped.join(" | ") || "nothing"));
+
+  // --- the reversal is paired with a real ancestor filter, or it is absent ---
+  // A reversal only makes sense against a forward filter that is genuinely
+  // being applied above. Two ways that fails, both reachable: the top document
+  // may not be running this script at all (a file:// page without file access,
+  // another extension's page) while an http(s) subframe of it is; and HOST is
+  // read from ancestorOrigins, which is the literal string "null" for an opaque
+  // origin, so the subframe falls back to its own hostname and can disagree
+  // with the top about the sliders, the engine, and whether to theme at all.
+  // Neither is knowable from inside the subframe, so it is told - and until it
+  // is told, it reverses nothing.
+  check("pairing: a subframe with no filtering ancestor reverses nothing",
+    !/filter:/.test(mediaRule(B.buildDynamicCss(TUNED, false, null))),
+    norm(mediaRule(B.buildDynamicCss(TUNED, false, null))));
+  check("pairing: and it still paints the rest of its own sheet",
+    B.buildDynamicCss(TUNED, false, null).includes(THEME_TOKENS.background));
+  // In filter mode there IS nothing else: pinning color-scheme light only makes
+  // sense as a light source for an inversion, and without one it forces a site's
+  // light theme onto a page nobody is inverting.
+  check("pairing: an unpaired filter-mode subframe emits nothing at all",
+    B.buildFilterCss(TUNED, false, null) === "",
+    JSON.stringify(B.buildFilterCss(TUNED, false, null)));
+  check("pairing: nor does it compensate for a top frame running the other engine",
+    B.buildFilterCss(TUNED, false, ancestorOf(TUNED, "dynamic")) === "",
+    JSON.stringify(B.buildFilterCss(TUNED, false, ancestorOf(TUNED, "dynamic"))));
+  // The top frame is never gated on this - it applies its own filter, so it is
+  // its own pair.
+  check("pairing: the top frame is unaffected by having no ancestor",
+    !!rootFilter(B.buildDynamicCss(TUNED, true, null)) &&
+    B.buildFilterCss(TUNED, true, null).includes("invert(1)"));
+
+  // The reversal follows the ANCESTOR's values, not this frame's own. Under a
+  // diverged host those differ, and the reversal is worthless unless it is the
+  // exact reverse of what was actually applied.
+  const diverged = B.buildDynamicCss({ ...B.DEFAULTS }, false, DYN_TOP);
+  check("pairing: the reversal reverses the ancestor's sliders, not this frame's",
+    norm(mediaRule(diverged)) === norm(mediaRule(dynTuned)), norm(mediaRule(diverged)));
+  // Down to whether it inverts: a dynamic-mode frame inside a filter-mode top is
+  // still sitting inside invert(1), and a reversal without it is a negative.
+  const underInvert = B.buildDynamicCss({ ...B.DEFAULTS }, false, FILTER_TOP);
+  check("pairing: a dynamic subframe under a filter-mode top reverses the invert too",
+    /invert\(1\) hue-rotate\(180deg\)/.test(mediaRule(underInvert)), norm(mediaRule(underInvert)));
+  // And themeImages is the ancestor's answer too: it decides whether media in
+  // its subtree was meant to carry the filter in the first place.
+  check("pairing: an ancestor that themes its images asks for no reversal",
+    !/filter:/.test(mediaRule(
+      B.buildDynamicCss(TUNED, false, { ...DYN_TOP, themeImages: true }))));
+
+  // --- what the top frame reports ------------------------------------------
+  // The other half of the pair: a subframe is only ever as right as this is.
+  await set({ mode: "dynamic", brightness: 130, contrast: 80, enabled: true, disabledSites: [] });
+  await tick();
+  check("report: a filtering top frame reports its sliders",
+    JSON.stringify(B.appliedFilter()) === JSON.stringify(ancestorOf(TUNED, "dynamic")),
+    JSON.stringify(B.appliedFilter()));
+  await set({ mode: "filter" });
+  await tick();
+  check("report: and its engine", (B.appliedFilter() || {}).mode === "filter",
+    JSON.stringify(B.appliedFilter()));
+  // Dynamic mode at default sliders paints no root filter at all, so there is
+  // nothing below it to reverse - reported as such, not as "brightness 100".
+  await set({ mode: "dynamic", brightness: 100, contrast: 100 });
+  await tick();
+  check("report: a top frame painting no root filter reports none",
+    B.appliedFilter() === null, JSON.stringify(B.appliedFilter()));
+  await set({ mode: "filter", brightness: 130 });
+  await tick();
+  await set({ enabled: false });
+  await tick();
+  check("report: a top frame that is switched off reports none",
+    B.appliedFilter() === null, JSON.stringify(B.appliedFilter()));
+  await set({ enabled: true, disabledSites: [B.HOST] });
+  await tick();
+  check("report: an excluded site reports none",
+    B.appliedFilter() === null, JSON.stringify(B.appliedFilter()));
+  await set({ disabledSites: [], siteOverrides: { [B.HOST]: { ...B.DEFAULTS, brightness: 145 } } });
+  await tick();
+  check("report: the site's own theme is what gets reported",
+    (B.appliedFilter() || {}).brightness === 145, JSON.stringify(B.appliedFilter()));
+  await set({ siteOverrides: {}, mode: "dynamic", brightness: 100, contrast: 100 });
+  await tick();
+
+  // --- the payload crosses postMessage, so it is rebuilt rather than trusted -
+  // Any script on the page can post one of these, and the numbers land in a
+  // stylesheet. A string that survived would close the declaration.
+  const R = B.readAncestorFilter;
+  check("payload: a non-object is no ancestor at all",
+    R(null) === null && R("junk") === null && R(undefined) === null);
+  const hostile = R({ mode: "filter", brightness: "1) } * { display: none } html {",
+                      contrast: {}, sepia: NaN, grayscale: Infinity, themeImages: "yes" });
+  check("payload: hostile values fall back to the neutral ones",
+    hostile.brightness === 100 && hostile.contrast === 100 &&
+    hostile.sepia === 0 && hostile.grayscale === 0 && hostile.themeImages === false,
+    JSON.stringify(hostile));
+  check("payload: and nothing of them reaches the stylesheet",
+    !/display: none/.test(B.buildFilterCss({ ...B.DEFAULTS }, false, hostile)),
+    norm(B.buildFilterCss({ ...B.DEFAULTS }, false, hostile)));
+  check("payload: out-of-range sliders are refused",
+    R({ brightness: 900, contrast: -5 }).brightness === 100 &&
+    R({ brightness: 900, contrast: -5 }).contrast === 100);
+  check("payload: an unknown engine is read as the non-inverting one",
+    R({ mode: "haunted" }).mode === "dynamic");
+  check("payload: values in range are kept",
+    R({ mode: "filter", brightness: 130, contrast: 80, sepia: 10, grayscale: 20,
+        themeImages: true }).brightness === 130);
 
   const filTuned = B.buildFilterCss({ ...B.DEFAULTS, brightness: 130, contrast: 80 }, true);
   check("media: filter mode reverses the sliders as well as the invert",
@@ -1031,6 +1150,28 @@ async function mainSuite() {
     const drift = isIdentity(then(compose(media), compose(B.cssFilterValue(s, true))));
     const label = Object.entries(tune).map(([k, v]) => k + " " + v).join(", ") || "defaults";
     check(`media: filter-mode reversal is exact (${label})`, drift < INVISIBLE, "drift=" + drift.toExponential(2));
+  }
+  // Same claim for a subframe, where the forward filter is the ancestor's and
+  // the reversal is built from what the ancestor reported rather than from this
+  // frame's own settings. Read out of the generated rule, so it is the shipped
+  // string being composed, not a re-derivation of it.
+  for (const [mode, tune] of [
+    ["dynamic", { brightness: 130, contrast: 80 }],
+    ["dynamic", { brightness: 70, contrast: 140, grayscale: 60 }],
+    ["filter", { brightness: 130, contrast: 80 }],
+    ["filter", {}]
+  ]) {
+    const top = ancestorOf({ ...B.DEFAULTS, ...tune }, mode);
+    // This frame's own settings are the DEFAULTS throughout - a diverged host,
+    // so nothing here can quietly be reversing its own values instead.
+    const sub = mode === "filter"
+      ? B.buildFilterCss({ ...B.DEFAULTS, mode }, false, top)
+      : B.buildDynamicCss({ ...B.DEFAULTS }, false, top);
+    const undo = (norm(mediaRule(sub)).match(/filter: ([^!]*)!important/) || [, ""])[1];
+    const drift = isIdentity(then(compose(undo), compose(B.cssFilterValue(top, mode === "filter"))));
+    const label = mode + " " + (Object.keys(tune).length ? JSON.stringify(tune) : "defaults");
+    check(`pairing: subframe reversal is exact against what the top applied (${label})`,
+      drift < INVISIBLE, "drift=" + drift.toExponential(2) + " undo=" + undo.trim());
   }
   // --- and it never makes a pixel worse ------------------------------------
   // The arithmetic above is exact, but a browser clamps to [0,1] between filter
@@ -1159,6 +1300,181 @@ async function invalidatedSuite() {
     thrown === null, thrown);
 }
 
+// ---------------------------------------------------------------------------
+// Suites: a real subframe, with and without a top frame running the extension.
+//
+// The builder assertions in the main suite pin down what a subframe emits for a
+// given ancestor. These two pin down the other half: that the ancestor it is
+// told about is the one that actually exists. `frames` runs the extension in
+// both documents, which is the ordinary case; `orphan` runs it only in the
+// subframe, which is what happens whenever Chrome declines the top document - a
+// file:// page without file access, another extension's page - while injecting
+// into an http(s) frame inside it.
+// ---------------------------------------------------------------------------
+let frameWin = null;
+
+async function bootFrame() {
+  const el = document.createElement("iframe");
+  el.id = "subframe";
+  el.style.cssText = "width:160px;height:90px;border:1px solid #ccc";
+  const ready = new Promise((res) => {
+    const on = (e) => {
+      if (e.data && e.data.type === "frame:ready") { window.removeEventListener("message", on); res(); }
+    };
+    window.addEventListener("message", on);
+  });
+  el.src = "frame.html";
+  document.body.appendChild(el);
+  await ready;
+  frameWin = el.contentWindow;
+}
+
+function askFrame() {
+  return new Promise((resolve) => {
+    const on = (e) => {
+      if (!e.data || e.data.type !== "frame:state") return;
+      window.removeEventListener("message", on);
+      resolve(e.data);
+    };
+    window.addEventListener("message", on);
+    frameWin.postMessage({ type: "frame:report" }, "*");
+  });
+}
+
+// chrome.storage.sync is shared by every frame on a page, so a write has to
+// reach both mocks.
+function setBoth(patch) {
+  frameWin.postMessage({ type: "frame:set", patch }, "*");
+  return set(patch);
+}
+
+// One frame only, which is what two frames disagreeing about their own host
+// amounts to: same page, same storage, different answers.
+function setFrameOnly(patch) {
+  frameWin.postMessage({ type: "frame:set", patch }, "*");
+}
+
+async function frameSettles(pred, ms = 5000) {
+  const t0 = performance.now();
+  let s = await askFrame();
+  while (!pred(s) && performance.now() - t0 < ms) {
+    await tick(40);
+    s = await askFrame();
+  }
+  return s;
+}
+
+const REVERSED = /brightness\(0\.76/;   // the reverse of brightness 130
+
+async function framesSuite() {
+  await waitUntil(() => !!window.__mm.settings);
+  await bootFrame();
+
+  let s = await askFrame();
+  check("frames: the subframe knows it is not the top frame", s.isTop === false);
+  check("frames: it is themed", !!s.css);
+  // Defaults: the top frame paints no root filter at all in dynamic mode, so
+  // there is nothing below it to reverse and it says so.
+  s = await frameSettles((x) => x.ancestor === null);
+  check("frames: a top frame painting no root filter tells the subframe none",
+    s.ancestor === null, JSON.stringify(s.ancestor));
+  check("frames: so the subframe leaves its media alone",
+    s.picFilter === "none", s.picFilter);
+
+  await setBoth({ brightness: 130, contrast: 80 });
+  s = await frameSettles((x) => !!x.ancestor);
+  check("frames: the top frame's sliders reach the subframe",
+    s.ancestor && s.ancestor.brightness === 130 && s.ancestor.contrast === 80,
+    JSON.stringify(s.ancestor));
+  check("frames: and the subframe re-renders its sheet to reverse them",
+    REVERSED.test(s.picFilter) && /contrast\(1\.25/.test(s.picFilter), s.picFilter);
+
+  // The isolated case: both frames stay themed, but the top frame's root filter
+  // goes away. The reversal has to go with it - it was never this frame's own
+  // setting, it was compensation.
+  await setBoth({ brightness: 100, contrast: 100 });
+  s = await frameSettles((x) => x.ancestor === null);
+  check("frames: the root filter going away withdraws the reversal",
+    s.ancestor === null && s.picFilter === "none", s.picFilter);
+  check("frames: while the subframe stays themed", !!s.css);
+
+  // --- divergence ---
+  // What an opaque-origin top document actually produces: ancestorOrigins
+  // serialises to the string "null", the subframe falls back to its own
+  // hostname, and the two frames resolve different per-site answers from the
+  // same page. Modelled by writing to one frame's settings and not the other's,
+  // which is the same thing from here: the reversal is only ever right if it
+  // came from what the top frame applied.
+  setFrameOnly({ brightness: 130, contrast: 80 });
+  await tick(250);
+  s = await askFrame();
+  check("frames: a subframe reverses nothing when the top applies nothing, whatever its own sliders say",
+    s.picFilter === "none" && s.ancestor === null, s.picFilter + " own sheet=" +
+      (/filter:/.test((s.css || "").split("}").find((r) => /(^|\n)\s*img/.test(r) && r.includes("filter:")) || "")));
+  setFrameOnly({ brightness: 100, contrast: 100 });
+  await set({ brightness: 130, contrast: 80 });
+  s = await frameSettles((x) => !!x.ancestor);
+  check("frames: and reverses the top frame's sliders even when its own say there is nothing to undo",
+    REVERSED.test(s.picFilter), s.picFilter);
+  await setBoth({ brightness: 100, contrast: 100 });
+  await frameSettles((x) => x.ancestor === null);
+
+  // Filter mode: everything the subframe emits there is compensation for the
+  // top frame's inversion, so it arrives with the news that there is one.
+  await setBoth({ mode: "filter" });
+  s = await frameSettles((x) => !!x.ancestor && x.ancestor.mode === "filter");
+  check("frames: the top frame's engine reaches the subframe too",
+    s.ancestor.mode === "filter", JSON.stringify(s.ancestor));
+  check("frames: only now does the subframe re-invert its media",
+    /invert\(1\)/.test(s.picFilter), s.picFilter);
+  check("frames: and pin color-scheme light for the inversion to work on",
+    /color-scheme: light/.test(s.css || ""));
+  check("frames: the subframe never emits a root filter of its own",
+    !/(^|\n)html \{/.test((s.css || "").replace(/\/\*[\s\S]*?\*\//g, "")), norm(s.css || ""));
+
+  // Switching the extension off has to reach the subframe as well - through the
+  // shared settings, not the channel, but the channel must not leave anything
+  // of the old state behind.
+  await setBoth({ enabled: false });
+  s = await frameSettles((x) => !x.css);
+  check("frames: switching off strips the subframe too",
+    !s.css && s.picFilter === "none", s.picFilter);
+  check("frames: and the ancestor filter is withdrawn with it",
+    s.ancestor === null, JSON.stringify(s.ancestor));
+}
+
+async function orphanSuite() {
+  check("orphan: the top document is not running the extension", !window.__mm);
+  await bootFrame();
+
+  let s = await askFrame();
+  check("orphan: the subframe is running it", !!s.css);
+  check("orphan: nothing ever answers its query", s.ancestor === null, JSON.stringify(s.ancestor));
+  check("orphan: so it reverses nothing", s.picFilter === "none", s.picFilter);
+
+  // The failure this suite exists for: sliders set, a subframe that themes
+  // itself, and no ancestor filter anywhere. Emitting the reversal here crushes
+  // every image in the frame - it is the adjustment applied backwards, once.
+  await setBoth({ brightness: 130, contrast: 80 });
+  await frameSettles((x) => (x.css || "").includes("brightness"), 2000);
+  await tick(200);
+  s = await askFrame();
+  check("orphan: an unpaired subframe still reverses nothing",
+    s.picFilter === "none" && s.ancestor === null, s.picFilter);
+  check("orphan: it is genuinely themed, not simply switched off",
+    !!s.css && s.css.includes(THEME_TOKENS.background));
+
+  // Filter mode is the visible one: a lone re-invert renders every photo as a
+  // colour negative, and color-scheme light forces the site's light theme with
+  // nothing to invert it.
+  await setBoth({ mode: "filter" });
+  await tick(300);
+  s = await askFrame();
+  check("orphan: an unpaired filter-mode subframe emits nothing at all",
+    s.css === "", JSON.stringify(s.css));
+  check("orphan: no lone re-invert on its media", s.picFilter === "none", s.picFilter);
+}
+
 function $id(id) { return document.getElementById(id); }
 
 // ---------------------------------------------------------------------------
@@ -1173,12 +1489,16 @@ function $id(id) { return document.getElementById(id); }
     if (MODE === "hint") {
       localStore.nativeDarkHosts = ["unrelated.example", location.hostname.replace(/^www\./, "")];
     }
-    await loadContentScript();
+    // Everything but "orphan" loads the extension into this top document. That
+    // suite exists precisely because Chrome sometimes does not.
+    if (MODE !== "orphan") await loadContentScript();
     if (MODE === "pending") await pendingSuite();
     else if (MODE === "nativedark") await nativeDarkSuite();
     else if (MODE === "earlycss") await earlyCssSuite();
     else if (MODE === "hint") await hintSuite();
     else if (MODE === "invalidated") await invalidatedSuite();
+    else if (MODE === "frames") await framesSuite();
+    else if (MODE === "orphan") await orphanSuite();
     else await mainSuite();
   } catch (e) {
     check("harness ran without throwing", false, (e && e.message) + " " + (e && e.stack || "").split("\n")[1]);
