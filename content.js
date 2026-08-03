@@ -272,15 +272,30 @@ img:fullscreen, video:fullscreen, canvas:fullscreen, embed:fullscreen, object:fu
     scrollThumb: "oklch(38% 0 0)"
   };
 
-  function buildDynamicCss(s) {
+  function buildDynamicCss(s, isTop = IS_TOP) {
     const extra = cssFilterValue(s, false);
-    const filterRule = extra ? `html${SP} { filter: ${extra} !important; }` : "";
+    // Top frame only, for the same reason filter mode gates its root rule: a
+    // filter on <html> rasterises the whole subtree, and an iframe's painted
+    // output is part of that subtree, so a subframe emitting its own copy had
+    // the sliders applied twice - brightness 130 landed on 169.
+    //
+    // Safe because every frame of a page agrees on whether to theme and how:
+    // HOST is the top frame's, the native-dark verdict is broadcast down from
+    // it, and effective() keys on that same host, so a themed subframe is
+    // always already inside a top frame carrying these exact sliders.
+    const filterRule = extra && isTop ? `html${SP} { filter: ${extra} !important; }` : "";
     // This engine never inverts, so the only thing that reaches media is the
     // slider filter on <html> - which is exactly what washed a photograph out
     // at brightness 130 / contrast 80. Media carries the reverse unless the
     // theme is meant to reach it. At default slider values there is nothing to
     // undo, so no rule is emitted and no image pays for a filter it does not
     // need.
+    //
+    // Emitted in every frame, unlike the root rule above: the top frame's
+    // filter rasterises a subframe's painted output too, so media in there is
+    // adjusted by it and needs the same reversal to come back out true to
+    // colour. Reversing once against a filter applied twice is what left one
+    // copy of the adjustment on every image inside an iframe.
     const undo = s.themeImages ? "" : undoFilterValue(s);
     const mediaRule = undo
       ? `

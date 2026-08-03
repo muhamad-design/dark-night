@@ -907,6 +907,36 @@ async function mainSuite() {
     !/img[^{]*\{[^}]*filter:/.test(
       B.buildDynamicCss({ ...B.DEFAULTS, brightness: 130, themeImages: true })));
 
+  // --- the slider filter reaches a subframe from the top frame ---------------
+  // A filter on <html> rasterises the whole subtree, and an iframe's painted
+  // output is part of it, so a subframe emitting its own copy of the root rule
+  // had the sliders applied twice - and since its media rule reverses them only
+  // once, one copy of the adjustment survived on every image inside an iframe.
+  // Dynamic mode had no gate at all here; filter mode has always had one.
+  //
+  // Located by shape, not by substring: the sheet also carries
+  // `html, body { background-color }` and `html { scrollbar-color }`, and prose
+  // that mentions <html> by name.
+  const rootFilter = (css) => (css.match(/^html[^,{\n]*\{ filter:[^\n]*/m) || [""])[0];
+  const dynSub = B.buildDynamicCss({ ...B.DEFAULTS, brightness: 130, contrast: 80 }, false);
+  check("frames: the top frame carries the root slider filter",
+    !!rootFilter(dynTuned), norm(rootFilter(dynTuned)));
+  check("frames: the root slider filter applies once, in the top frame only",
+    !rootFilter(dynSub), norm(rootFilter(dynSub)));
+  // Gating the root rule must not take the reversal with it: the top frame's
+  // filter still reaches media in here, so it still needs the same reversal -
+  // the identical one, since it is reversing the identical single application.
+  check("frames: a subframe still reverses the sliders on its own media",
+    norm(mediaRule(dynSub)) === norm(mediaRule(dynTuned)) && /filter:/.test(mediaRule(dynSub)),
+    norm(mediaRule(dynSub)));
+  // And nothing else moved: dynamic mode paints per frame, so a subframe needs
+  // every other rule in full. The sheets must differ by exactly that one rule.
+  const linesOf = (c) => c.split("\n").map(norm).filter(Boolean);
+  const dropped = linesOf(dynTuned).filter((l) => !linesOf(dynSub).includes(l));
+  check("frames: the root filter is the only rule a subframe drops",
+    norm(dynSub) === norm(dynTuned.replace(rootFilter(dynTuned), "")),
+    "dropped: " + (dropped.join(" | ") || "nothing"));
+
   const filTuned = B.buildFilterCss({ ...B.DEFAULTS, brightness: 130, contrast: 80 }, true);
   check("media: filter mode reverses the sliders as well as the invert",
     /brightness/.test(mediaRule(filTuned)) && /invert\(1\)/.test(mediaRule(filTuned)),
