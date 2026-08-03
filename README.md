@@ -227,6 +227,14 @@ The sheet is also adopted into every open shadow root, because a `<style>` in `<
 does not cross a shadow boundary and `background-color` does not inherit. Without that,
 component-based apps kept their light surfaces.
 
+Every frame emits this sheet, with one exception: the slider filter on `<html>` is emitted
+only in the top frame. A filter on `<html>` rasterises the whole subtree, and an iframe's
+painted output is part of that subtree, so a subframe emitting its own copy had the sliders
+applied twice - brightness 130 landing on 169, and compounding again per nesting level.
+Filter mode has always gated its root rule this way. The media reversal is *not* gated, and
+must not be: the top frame's filter still reaches a subframe's media, so it still needs the
+same single reversal.
+
 **Filter** applies `invert(1) hue-rotate(180deg)` to the page and re-inverts images, video
 and embedded content so photos keep their real colors. It handles any site uniformly but is
 less precise on complex layouts.
@@ -273,7 +281,7 @@ python3 -m http.server 8765
 
 | URL | Covers |
 | --- | --- |
-| `localhost:8765/test/harness.html` | 127 assertions: both engines, specificity, shadow DOM (including a real custom-element upgrade), frames, top layer, sliders, toggles, per-site rules and per-site themes, liveness-poll gating, self-heal, host matching - and the media reversal, checked as arithmetic: the filter functions are re-implemented as affine maps and the composed chain must land on the identity |
+| `localhost:8765/test/harness.html` | 131 assertions: both engines, specificity, shadow DOM (including a real custom-element upgrade), frames, top layer, sliders, toggles, per-site rules and per-site themes, which rules a subframe emits and which it leaves to the top frame, liveness-poll gating, self-heal, host matching - and the media reversal, checked as arithmetic: the filter functions are re-implemented as affine maps and the composed chain must land on the identity |
 | `localhost:8765/test/harness.html?suite=pending` | A settings write landing between the initial storage read and its callback |
 | `localhost:8765/test/harness.html?suite=nativedark` | 43 assertions: the colour classifier across every notation and its alpha handling, stepping aside on an already-dark page, the scheduled recheck catching a page that flips, `forcedSites`, the auto-skip toggle, and what gets remembered |
 | `localhost:8765/test/harness.html?suite=earlycss` | 8 assertions: detection against the **real** `early.css` on a light page with a transparent `<body>` - the pre-paint sheet must be released before the first measurement, or the engine reads its own dark colour and switches off on a white page |
