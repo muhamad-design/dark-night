@@ -2,6 +2,12 @@
 
 A Manifest V3 Chrome extension that applies a dark theme to any website.
 
+<p>
+  <img src="screenshots/popup-default.png" width="260" alt="Popup default state: dynamic engine, master toggle on" />
+  <img src="screenshots/popup-native-dark.png" width="260" alt="Popup on an already-dark page: filter engine, stepped aside automatically" />
+  <img src="screenshots/popup-excluded-sites.png" width="260" alt="Popup with the excluded-sites list open" />
+</p>
+
 ## Install
 
 The popup is a React bundle, so it has to be built before Chrome can load it.
