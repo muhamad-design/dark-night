@@ -84,20 +84,30 @@ export function useSettings(): SettingsApi {
     });
   }, []);
 
-  // Switching auto-skip on mid-session makes the content script measure for
-  // the first time; without a re-ask the popup would keep a stale "not dark"
-  // from before the toggle. Delayed a tick so the measurement lands first.
-  const autoSkipSeen = useRef<boolean | null>(null);
+  // The content script re-measures whenever one of these changes - they are the
+  // exact set its storage.onChanged handler reacts to - so the popup has to
+  // re-ask or it keeps rendering a verdict taken under the previous policy.
+  // Re-enabling a site that turns out to be natively dark was the visible case:
+  // the page correctly stepped aside while the popup showed no banner at all
+  // and no way to reach the override. Delayed a tick so the measurement lands
+  // before the question.
+  const policy = [
+    settings.enabled,
+    settings.autoSkipNativeDark,
+    settings.disabledSites.join(" "),
+    settings.forcedSites.join(" ")
+  ].join("|");
+  const policySeen = useRef<string | null>(null);
   useEffect(() => {
-    if (autoSkipSeen.current === null) {
-      autoSkipSeen.current = settings.autoSkipNativeDark;
+    if (policySeen.current === null) {
+      policySeen.current = policy;
       return;
     }
-    if (autoSkipSeen.current === settings.autoSkipNativeDark) return;
-    autoSkipSeen.current = settings.autoSkipNativeDark;
+    if (policySeen.current === policy) return;
+    policySeen.current = policy;
     const t = setTimeout(queryNativeDark, 150);
     return () => clearTimeout(t);
-  }, [settings.autoSkipNativeDark, queryNativeDark]);
+  }, [policy, queryNativeDark]);
 
   const applyChanges = useCallback((changes: Changes) => {
     setSettings((prev) => {

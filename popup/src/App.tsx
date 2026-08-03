@@ -75,8 +75,18 @@ export default function App() {
 
   function unforceSite() {
     if (!forcedEntry) return;
-    save({ forcedSites: settings.forcedSites.filter((d) => d !== forcedEntry) });
-    setStatus(`Stepped aside on ${forcedEntry}`);
+    const next = settings.forcedSites.filter((d) => d !== forcedEntry);
+    save({ forcedSites: next });
+    // An exact entry wins over a parent one, so removing it can leave a broader
+    // rule still forcing this host - the page stays themed and the banner stays
+    // up. Report what is true after the removal rather than what was asked for,
+    // exactly as the exclusion list does.
+    const remaining = blockingEntry(currentSite, next);
+    setStatus(
+      remaining
+        ? `Removed ${forcedEntry} - still themed by ${remaining}`
+        : `Stepped aside on ${forcedEntry}`
+    );
   }
 
   function toggleSite() {

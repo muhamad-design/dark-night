@@ -382,6 +382,36 @@ async function run() {
   await waitFor(() => !$("#nativeDarkNote"));
   check("nativedark: banner hidden while auto-skip is off", !$("#nativeDarkNote"));
 
+  // --- "Step aside" must not claim success a parent entry contradicts --------
+  // An exact entry wins over a parent one, so removing it can leave the site
+  // still force-themed. Saying "Stepped aside" while the forced banner is still
+  // on screen is the popup contradicting itself.
+  await mount({ ...CLEAN, forcedSites: ["docs.example.com", "example.com"] },
+    "https://docs.example.com/", true);
+  check("nativedark: exact forced entry is the one offered",
+    !!$("#forcedNote"), txt("#forcedNote"));
+  $("#unforceSite").click();
+  await waitFor(() => !store.forcedSites.includes("docs.example.com"));
+  check("nativedark: only the exact entry is removed",
+    JSON.stringify(store.forcedSites) === '["example.com"]', JSON.stringify(store.forcedSites));
+  await waitFor(() => txt("#status").length > 0);
+  check("nativedark: the parent rule that still applies is named, not hidden",
+    txt("#status").includes("example.com") && !txt("#status").startsWith("Stepped aside"),
+    txt("#status"));
+  check("nativedark: the banner still says the site is themed", !!$("#forcedNote"));
+
+  // --- the banner follows a policy change, without reopening the popup -------
+  // content.js re-measures when enabled / disabledSites change, so the popup
+  // has to re-ask. Re-enabling an excluded, natively dark site left the popup
+  // showing no banner and no way to reach the override.
+  await mount({ ...CLEAN, disabledSites: ["dark.example.com"] }, "https://dark.example.com/", true);
+  check("nativedark: no banner while the site is excluded", !$("#nativeDarkNote"));
+  $("#siteToggle").click();
+  await waitFor(() => store.disabledSites.length === 0);
+  await waitFor(() => !!$("#nativeDarkNote"), 3000);
+  check("nativedark: re-enabling the site surfaces the banner without reopening",
+    !!$("#nativeDarkNote"), txt("#nativeDarkNote"));
+
   // --- no banner where it does not belong ------------------------------------
   await mount(CLEAN, "https://example.com/", false);
   check("nativedark: no banner on a light page", !$("#nativeDarkNote") && !$("#forcedNote"));

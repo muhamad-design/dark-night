@@ -67,10 +67,17 @@
 const params = new URLSearchParams(location.search);
 const MODE = params.get("suite") || "main";
 
+// Both suites that need to inspect the state between the settings read being
+// issued and its callback hold that read open. Only "pending" also makes writes
+// dispatch synchronously; "hint" wants ordinary async writes.
+const HOLD_SYNC = MODE === "pending" || MODE === "hint";
+
 const store = {};
+const localStore = {};
 const changeListeners = [];
 const listenerErrors = [];
 let heldGet = null;
+let localWrites = 0;
 
 window.chrome = {
   runtime: { id: "dark-night-test", lastError: null },
@@ -78,7 +85,7 @@ window.chrome = {
     sync: {
       get(defaults, cb) {
         const snapshot = { ...defaults, ...store };
-        if (MODE === "pending") heldGet = () => cb(snapshot);   // harness controls delivery
+        if (HOLD_SYNC) heldGet = () => cb(snapshot);   // harness controls delivery
         else setTimeout(() => cb(snapshot), 0);
       },
       set(patch, cb) {
@@ -98,6 +105,22 @@ window.chrome = {
         };
         if (MODE === "pending") dispatch();
         else setTimeout(dispatch, 0);
+      }
+    },
+    // The remembered-verdict hint. A separate area from sync on purpose - it is
+    // a per-machine observation, not a synced preference - so it gets its own
+    // store here too, and never fires the sync change listeners.
+    local: {
+      get(defaults, cb) {
+        const snapshot = { ...defaults, ...localStore };
+        setTimeout(() => cb(snapshot), 0);
+      },
+      set(patch, cb) {
+        localWrites++;
+        setTimeout(() => {
+          Object.assign(localStore, patch);
+          if (cb) cb();
+        }, 0);
       }
     },
     onChanged: { addListener(fn) { changeListeners.push(fn); } }
@@ -346,6 +369,32 @@ async function nativeDarkSuite() {
   check("classify: lab light", dark("lab(90 0 0)") === false);
   check("classify: unparsed keyword is unknown", dark("ButtonFace") === null);
 
+  // Alpha in the modern syntaxes. Chrome keeps these notations in the computed
+  // value, alpha and all, and a Tailwind 4 `bg-black/10` on <body> computes to
+  // exactly oklab(0 0 0 / 0.1). Reading only the legacy rgba() alpha meant that
+  // faint tint on a white page was scored as opaque black - and <body> is
+  // measured first, so it decided the whole verdict and the engine switched
+  // itself off on a white page.
+  check("classify: translucent oklab is unknown, like translucent rgba",
+    dark("oklab(0 0 0 / 0.1)") === null, String(dark("oklab(0 0 0 / 0.1)")));
+  check("classify: translucent oklch is unknown", dark("oklch(0.15 0 0 / 0.3)") === null);
+  check("classify: translucent lab is unknown", dark("lab(20 0 0 / 0.2)") === null);
+  check("classify: fully transparent modern syntax is unknown",
+    dark("oklab(0 0 0 / 0)") === null);
+  check("classify: percentage alpha is understood", dark("oklch(0.15 0 0 / 20%)") === null);
+  check("classify: opaque modern syntax still classifies",
+    dark("oklch(0.15 0 0 / 0.9)") === true && dark("oklch(0.95 0 0 / 1)") === false);
+
+  // color(srgb ...) is what Chrome returns for a background built with
+  // color-mix(in srgb, ...) or relative colour syntax. Unparsed, a dark page
+  // using either read as "cannot tell" and filter mode inverted it to white.
+  check("classify: color(srgb) dark", dark("color(srgb 0.07 0.09 0.11)") === true,
+    String(dark("color(srgb 0.07 0.09 0.11)")));
+  check("classify: color(srgb) light", dark("color(srgb 1 1 1)") === false);
+  check("classify: color(display-p3) dark", dark("color(display-p3 0.07 0.09 0.11)") === true);
+  check("classify: translucent color(srgb) is unknown",
+    dark("color(srgb 0 0 0 / 0.2)") === null);
+
   // --- re-measurement on a policy nudge, immediately ---
   // Back to dark: toggling auto-skip re-takes the verdict without waiting for
   // any timer, and the fresh verdict steps aside again.
@@ -376,6 +425,93 @@ async function nativeDarkSuite() {
   await set({ autoSkipNativeDark: true });
   await waitUntil(() => !styleEl());
   check("nativedark: auto-skip back on steps aside", !styleEl());
+
+  // --- the classifier bug, end to end ---
+  // A white page carrying a faint dark tint in a modern colour syntax. Before
+  // alpha was read in that branch this measured "already dark" and the engine
+  // removed itself from a white page.
+  document.documentElement.style.backgroundColor = "#ffffff";
+  document.body.style.backgroundColor = "color-mix(in oklab, black 10%, transparent)";
+  check("nativedark: the tint really does compute to modern syntax with alpha",
+    /\/\s*0?\.1/.test(getComputedStyle(document.body).backgroundColor) ||
+      getComputedStyle(document.body).backgroundColor.startsWith("rgba"),
+    getComputedStyle(document.body).backgroundColor);
+  await set({ autoSkipNativeDark: false });
+  await set({ autoSkipNativeDark: true });
+  await waitUntil(() => !!styleEl());
+  check("nativedark: a faint tint on a white page is not 'already dark'",
+    !!styleEl() && window.__mm.nativeDark === false, "nativeDark=" + window.__mm.nativeDark);
+  document.body.style.backgroundColor = "";
+  document.documentElement.style.backgroundColor = "";
+
+  // --- the remembered verdict ---
+  // Written only from a real measurement, so the next load can theme the gap
+  // before DOMContentLoaded the way this one ended.
+  // The verdict is already light (the theme is back on); this waits for the
+  // write behind it, which is two storage round-trips rather than instant.
+  await waitUntil(() =>
+    Array.isArray(localStore.nativeDarkHosts) &&
+    !localStore.nativeDarkHosts.includes(window.__mm.HOST));
+  check("hint: a light page is not remembered as dark",
+    !(localStore.nativeDarkHosts || []).includes(window.__mm.HOST),
+    JSON.stringify(localStore.nativeDarkHosts));
+
+  document.body.style.backgroundColor = "#111213";
+  await set({ autoSkipNativeDark: false });
+  await set({ autoSkipNativeDark: true });
+  await waitUntil(() => (localStore.nativeDarkHosts || []).includes(window.__mm.HOST));
+  check("hint: a dark page is remembered",
+    (localStore.nativeDarkHosts || []).includes(window.__mm.HOST),
+    JSON.stringify(localStore.nativeDarkHosts));
+
+  // Turning the feature off must not erase what the last real look found - that
+  // "false" means "not measured", not "measured light".
+  const beforeOff = JSON.stringify(localStore.nativeDarkHosts);
+  await set({ autoSkipNativeDark: false });
+  await tick(120);
+  check("hint: switching auto-skip off does not erase the remembered verdict",
+    JSON.stringify(localStore.nativeDarkHosts) === beforeOff,
+    JSON.stringify(localStore.nativeDarkHosts));
+  await set({ autoSkipNativeDark: true });
+  await waitUntil(() => !styleEl());
+}
+
+// ---------------------------------------------------------------------------
+// Suite: the remembered verdict seeds the next load.
+//
+// The hint exists because the first measurement cannot happen before
+// DOMContentLoaded, while the theme goes on as soon as the settings read
+// resolves. It must be a hint and not a decision: this page is LIGHT while the
+// hint says dark, so the theme has to be withheld at first and then applied the
+// moment the real measurement disagrees.
+// ---------------------------------------------------------------------------
+async function hintSuite() {
+  // The settings read is held open, so this is the state the page is in during
+  // the window the hint exists to cover: hint consumed, nothing applied yet.
+  // Both reads are in flight together, so the hint is awaited rather than
+  // assumed to have landed first.
+  await waitUntil(() => !!heldGet);
+  await waitUntil(() => window.__mm.nativeDark === true);
+  check("hint: in place while the settings read is still outstanding",
+    window.__mm.nativeDark === true, "nativeDark=" + window.__mm.nativeDark);
+  check("hint: nothing applied while the settings read is in flight", !styleEl());
+
+  heldGet();
+  await tick();
+  check("hint: settings arrived", !!window.__mm.settings);
+
+  // The page is light, so the measurement must overrule the hint.
+  await waitUntil(() => !!styleEl());
+  check("hint: a stale hint is corrected by the measurement", !!styleEl());
+  check("hint: verdict follows the page, not the hint", window.__mm.nativeDark === false,
+    "nativeDark=" + window.__mm.nativeDark);
+  await waitUntil(() => !(localStore.nativeDarkHosts || []).includes(window.__mm.HOST));
+  check("hint: the corrected verdict replaces the stale one",
+    !(localStore.nativeDarkHosts || []).includes(window.__mm.HOST),
+    JSON.stringify(localStore.nativeDarkHosts));
+  check("hint: unrelated hosts are left alone",
+    (localStore.nativeDarkHosts || []).includes("unrelated.example"),
+    JSON.stringify(localStore.nativeDarkHosts));
 }
 
 // ---------------------------------------------------------------------------
@@ -736,10 +872,16 @@ function $id(id) { return document.getElementById(id); }
     // must already look dark when content.js loads.
     if (MODE === "nativedark") document.body.style.backgroundColor = "#111213";
     if (MODE === "earlycss") await installEarlyCss();
+    // A remembered verdict from a previous visit, in place before content.js
+    // reads it. The page itself stays light, so the hint is wrong on purpose.
+    if (MODE === "hint") {
+      localStore.nativeDarkHosts = ["unrelated.example", location.hostname.replace(/^www\./, "")];
+    }
     await loadContentScript();
     if (MODE === "pending") await pendingSuite();
     else if (MODE === "nativedark") await nativeDarkSuite();
     else if (MODE === "earlycss") await earlyCssSuite();
+    else if (MODE === "hint") await hintSuite();
     else await mainSuite();
   } catch (e) {
     check("harness ran without throwing", false, (e && e.message) + " " + (e && e.stack || "").split("\n")[1]);

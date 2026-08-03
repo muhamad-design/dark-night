@@ -104,13 +104,25 @@ engine would otherwise read that colour and switch itself off on a white page. I
 measures dark (relative luminance, with `oklch`/`lab` and `color-scheme` fallbacks), the
 theme steps aside for that load and the popup says so.
 
+Colours are classified from the computed value in whatever notation Chrome hands back:
+legacy `rgb()`/`rgba()`, `color(srgb …)` (what `color-mix(in srgb, …)` and relative colour
+syntax compute to), and `oklch`/`oklab`/`lab`/`lch` (what Tailwind 4 emits). A background
+that is see-through in *any* of those notations is "cannot tell", not dark - a faint
+`bg-black/10` tint on `<body>` computes to `oklab(0 0 0 / 0.1)`, and reading it as opaque
+black switched the engine off on a white page.
+
 Only the top frame measures; subframes follow its verdict over `postMessage`, because in
 filter mode a subframe's CSS assumes the top frame's filter exists and frames must agree.
 
-The verdict is a measurement, not a stored state - nothing is written to the exclusion
-list, so a site that later drops its dark theme is themed again automatically. Two settings
-control it: `autoSkipNativeDark` (the popup switch, default on) and `forcedSites` ("Theme
-it anyway", per site).
+The verdict is never a stored *decision* - nothing is written to the exclusion list, so a
+site that later drops its dark theme is themed again automatically. It is remembered as a
+*hint*, per host in `chrome.storage.local`: the first measurement cannot happen before
+DOMContentLoaded, while the theme goes on as soon as the settings read resolves, and in
+filter mode that gap put `invert(1)` over a self-theming dark site and rendered it white on
+every visit. The remembered verdict seeds that gap; the measurement still runs and overrules
+it in either direction, so a stale hint costs one load, not a wrong state. Two settings
+control the feature itself: `autoSkipNativeDark` (the popup switch, default on) and
+`forcedSites` ("Theme it anyway", per site).
 
 One case is deliberately not a miss: if the browser prefers light and the site only goes
 dark via `prefers-color-scheme`, the page really is rendering light, and theming it is the
@@ -181,10 +193,11 @@ python3 -m http.server 8765
 | --- | --- |
 | `localhost:8765/test/harness.html` | 102 assertions: both engines, specificity, shadow DOM (including a real custom-element upgrade), frames, top layer, sliders, toggles, per-site rules, liveness-poll gating, self-heal, host matching |
 | `localhost:8765/test/harness.html?suite=pending` | A settings write landing between the initial storage read and its callback |
-| `localhost:8765/test/harness.html?suite=nativedark` | 28 assertions: the colour classifier, stepping aside on an already-dark page, the scheduled recheck catching a page that flips, `forcedSites` and the auto-skip toggle |
+| `localhost:8765/test/harness.html?suite=nativedark` | 43 assertions: the colour classifier across every notation and its alpha handling, stepping aside on an already-dark page, the scheduled recheck catching a page that flips, `forcedSites`, the auto-skip toggle, and what gets remembered |
 | `localhost:8765/test/harness.html?suite=earlycss` | 8 assertions: detection against the **real** `early.css` on a light page with a transparent `<body>` - the pre-paint sheet must be released before the first measurement, or the engine reads its own dark colour and switches off on a white page |
+| `localhost:8765/test/harness.html?suite=hint` | 8 assertions: a remembered verdict seeds the load before the settings arrive, and a stale one is corrected by the measurement rather than believed |
 | `localhost:8765/test/perf-bench.html` | Style-resolution cost of the real dynamic sheet on a ~9,500-element DOM, and a guard on the specificity booster: it must stay cascade-identical to the chained form and beat it head-to-head |
-| `localhost:8765/test/popup-harness.html` | 77 assertions: the **built** React popup against a mocked `chrome`, including beUI component wiring, rejected writes, external changes, corrupt settings and the native-dark banner |
+| `localhost:8765/test/popup-harness.html` | 83 assertions: the **built** React popup against a mocked `chrome`, including beUI component wiring, rejected writes, external changes, corrupt settings, and the native-dark banner with its parent-rule disclosure and policy re-query |
 | `localhost:8765/test/worker-harness.html` | 32 assertions: the real `background.js` driven as a black box against a mocked MV3 surface - registration lifecycle, badge clearing, tab adoption, the shortcut, host matching, corrupt storage |
 | `localhost:8765/test/test.html?mode=dynamic\|filter\|off` | Visual page with the layout patterns that commonly break dark-mode extensions |
 

@@ -504,21 +504,42 @@ ${filterRule}
     return nativeDark && s.autoSkipNativeDark && !siteForced(s);
   }
 
+  // Relative luminance, sRGB components in 0..1.
+  function rgbIsDark(r, g, b) {
+    const lin = (v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+    return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b) < 0.2;
+  }
+
   // true / false / null for "cannot tell" - transparent, translucent, or a
   // syntax this does not parse. Failing toward light is the safe direction:
   // the theme just applies, which is the behaviour the user installed.
   function colorIsDark(color) {
+    // Alpha first, whichever syntax carries it. A see-through background says
+    // nothing about what the page renders, so it is "cannot tell" regardless of
+    // the colour underneath. Modern syntax puts it after a slash -
+    // `oklab(0 0 0 / 0.1)`, which is what a Tailwind 4 `bg-black/10` computes
+    // to - and legacy rgba() puts it fourth. Reading only the legacy form let a
+    // faint tint on an otherwise white <body> read as opaque black, and since
+    // <body> is measured first that one value decided the whole verdict: the
+    // engine switched itself off on a white page.
+    const slash = /\/\s*([\d.]+)(%?)\s*\)$/.exec(color);
+    if (slash && Number(slash[1]) / (slash[2] === "%" ? 100 : 1) < 0.5) return null;
+
     let m = /^rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?\)$/.exec(color);
     if (m) {
       if (m[4] !== undefined && Number(m[4]) < 0.5) return null; // see-through
-      const lin = (c) => {
-        const v = Number(c) / 255;
-        return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
-      };
-      return 0.2126 * lin(m[1]) + 0.7152 * lin(m[2]) + 0.0722 * lin(m[3]) < 0.2;
+      return rgbIsDark(Number(m[1]) / 255, Number(m[2]) / 255, Number(m[3]) / 255);
     }
-    // Chrome serialises modern-syntax backgrounds (Tailwind 4 emits oklch) in
-    // their own notation; the first component is always lightness.
+    // `color(srgb 0.07 0.09 0.11)` is what Chrome returns for a background
+    // built with `color-mix(in srgb, ...)` or relative colour syntax - both
+    // common in current design systems. Wider gamuts take the same path: the
+    // component values differ slightly from their sRGB equivalents, but never
+    // enough to move a colour across the light/dark line.
+    m = /^color\(\s*(?:srgb|display-p3|a98-rgb|prophoto-rgb|rec2020)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/.exec(color);
+    if (m) return rgbIsDark(Number(m[1]), Number(m[2]), Number(m[3]));
+
+    // Chrome preserves the other modern notations as written (Tailwind 4 emits
+    // oklch); in all of them the first component is lightness.
     m = /^(oklch|oklab|lab|lch)\(\s*([\d.]+)(%?)/.exec(color);
     if (m) {
       let l = Number(m[2]);
@@ -556,6 +577,36 @@ ${filterRule}
     }
   }
 
+  // The measurement cannot happen before DOMContentLoaded - at document_start
+  // there is nothing styled to read - but the theme goes on as soon as the
+  // settings read resolves, which is far earlier. In filter mode that gap put
+  // invert(1) over a site serving its own dark theme, so the page rendered
+  // blinding white from first paint until the verdict, on every single visit.
+  //
+  // The last verdict for the host is remembered so the next load can theme that
+  // gap the way the previous one ended. It is a hint, not a decision: the
+  // measurement still runs and overrules it in either direction, so a site that
+  // changes its mind corrects itself within one load. Kept in storage.local -
+  // it is a per-machine observation about a page, not a preference worth
+  // syncing across the profile's devices.
+  const HINT_KEY = "nativeDarkHosts";
+  const HINT_LIMIT = 200; // oldest fall off; a hint is only ever an optimisation
+
+  function rememberVerdict(dark) {
+    chrome.storage.local.get({ [HINT_KEY]: [] }, (stored) => {
+      if (chrome.runtime.lastError) return;
+      const list = (Array.isArray(stored[HINT_KEY]) ? stored[HINT_KEY] : []).filter(
+        (h) => h !== HOST
+      );
+      if (dark) list.push(HOST);
+      chrome.storage.local.set({ [HINT_KEY]: list.slice(-HINT_LIMIT) }, () => {
+        if (chrome.runtime.lastError) {
+          /* quota or a dead bridge - the hint is disposable, so let it go */
+        }
+      });
+    });
+  }
+
   function checkNativeDark() {
     if (!IS_TOP || !settings || !document.body) return;
     // Measured only while the result could matter; when the extension or the
@@ -563,6 +614,10 @@ ${filterRule}
     // aside" and the page is never touched for it.
     const worth = settings.enabled && !siteDisabled(settings) && settings.autoSkipNativeDark;
     const verdict = worth ? measurePageDark() : false;
+    // Recorded only from a real measurement. A "false" that merely means "not
+    // measured because the feature is off" must not erase what the last real
+    // look at this site found.
+    if (worth) rememberVerdict(verdict);
     if (verdict === nativeDark) return;
     nativeDark = verdict;
     applyTheme();
@@ -763,7 +818,7 @@ ${filterRule}
     }
   }
 
-  chrome.storage.sync.get(DEFAULTS, (stored) => {
+  function begin(stored) {
     settings = stored;
     // Replay anything that landed while the read was in flight.
     if (pending) {
@@ -780,6 +835,36 @@ ${filterRule}
     // colour and switched itself off on a white page.
     document.documentElement.setAttribute(READY_ATTR, "");
     armDetection();
+  }
+
+  // Both reads are issued at once and the theme waits for the pair. Chaining
+  // them would be simpler, but the hint has to be in place before applyTheme
+  // runs, so chaining would put a second storage round-trip in front of every
+  // page's theme - doubling the window early.css exists to cover, to save a
+  // flash that only filter mode suffers.
+  //
+  // Only the top frame carries a hint: a subframe never measures, and nothing
+  // in its own CSS is spoiled by not having one - it waits for the verdict the
+  // top frame sends.
+  let hintRead = !IS_TOP;
+  let firstSettings = null;
+
+  function beginWhenReady() {
+    if (!hintRead || !firstSettings) return;
+    begin(firstSettings);
+  }
+
+  if (IS_TOP) {
+    chrome.storage.local.get({ [HINT_KEY]: [] }, (local) => {
+      const list = chrome.runtime.lastError || !local ? [] : local[HINT_KEY];
+      nativeDark = Array.isArray(list) && list.includes(HOST);
+      hintRead = true;
+      beginWhenReady();
+    });
+  }
+  chrome.storage.sync.get(DEFAULTS, (stored) => {
+    firstSettings = stored;
+    beginWhenReady();
   });
 
   chrome.storage.onChanged.addListener((changes, area) => {
