@@ -7,6 +7,7 @@ import {
   useContext,
   useId,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -70,8 +71,15 @@ export function Tabs({
     () => ({ value: current, setValue, layoutId, variant }),
     [current, layoutId, setValue, variant],
   );
+  // The indicator must only glide when the active tab itself changes. Any
+  // other re-render - e.g. sibling content elsewhere in the popup growing or
+  // shrinking and shifting this tab bar's position on the page - has to snap
+  // the pill instantly instead of replaying a spring across that jump.
+  const prevValue = useRef(current);
+  const valueChanged = prevValue.current !== current;
+  prevValue.current = current;
   return (
-    <MotionConfig transition={reduce ? { duration: 0 } : transition}>
+    <MotionConfig transition={reduce || !valueChanged ? { duration: 0 } : transition}>
       <TabsCtx.Provider value={contextValue}>
         {/* layoutRoot: the indicator's layoutId measures in page coordinates, so
             inside fixed/scrolled containers it would replay scroll offsets as
