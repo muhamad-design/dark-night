@@ -36,6 +36,13 @@ window.chrome = {
   runtime: { id: "dark-night-perf", lastError: null },
   storage: {
     sync: { get(defaults, cb) { setTimeout(() => cb({ ...defaults, enabled: false }), 0); } },
+    // The remembered-verdict hint. content.js reads it in the top frame during
+    // startup, so it has to exist even though this bench keeps no state: the
+    // defaults come straight back, and writes are accepted and dropped.
+    local: {
+      get(defaults, cb) { setTimeout(() => cb({ ...defaults }), 0); },
+      set(patch, cb) { setTimeout(() => { if (cb) cb(); }, 0); }
+    },
     onChanged: { addListener() {} }
   }
 };
