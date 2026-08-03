@@ -64,7 +64,7 @@ SIL Open Font License 1.1; the licence travels with the fonts.
 
 | Control | What it does |
 | --- | --- |
-| Toolbar toggle | Master on/off. Badge reads `off` when disabled. |
+| Toolbar toggle | Master on/off. |
 | `Alt+Shift+D` | Same toggle, from the keyboard. |
 | Disable for this site | Per-site opt-out. Matches subdomains, and ignores a leading `www.` |
 | Dynamic / Filter | The two theming engines (below). |
@@ -77,8 +77,8 @@ because a storage read is normally a few milliseconds, the shimmer placeholder o
 if that read passes 120ms. Only *exits* animate; a frozen exit merely leaves content on
 screen, whereas a frozen entrance leaves it invisible.
 
-The badge reads `off` when the master switch is off and `site` when the tab you are
-looking at is excluded, so "did that actually apply?" is answerable at a glance.
+The toolbar icon is never decorated - no badge, no overlay. State is answered by the
+popup, which is where it is legible.
 
 When the current site is excluded by a *parent* domain rule, the button says
 `Enable example.com` rather than `Enable for this site` - removing that entry re-enables
@@ -131,7 +131,7 @@ the `<html>` subtree, so the root filter never reached them and they stayed whit
 | --- | --- |
 | `manifest.json` | MV3 manifest - `storage` + `scripting` permissions, content script on all URLs and frames |
 | `content.js` | Theme engine: builds the stylesheet, keeps it applied, reacts to setting changes |
-| `background.js` | Service worker: keyboard shortcut, badge, pre-paint CSS registration, injection into open tabs |
+| `background.js` | Service worker: keyboard shortcut, pre-paint CSS registration, injection into open tabs |
 | `early.css` | Pre-paint dark background that prevents the white flash on page load |
 | `popup/src/` | Popup source: React app, beUI components, beUI theme |
 | `popup/src/fonts/` | Geist variable fonts, vendored with their licence |
@@ -155,7 +155,7 @@ python3 -m http.server 8765
 | `localhost:8765/test/harness.html?suite=pending` | A settings write landing between the initial storage read and its callback |
 | `localhost:8765/test/perf-bench.html` | Style-resolution cost of the real dynamic sheet on a ~9,500-element DOM, and a guard on the specificity booster: it must stay cascade-identical to the chained form and beat it head-to-head |
 | `localhost:8765/test/popup-harness.html` | 65 assertions: the **built** React popup against a mocked `chrome`, including beUI component wiring, rejected writes, external changes and corrupt settings |
-| `localhost:8765/test/worker-harness.html` | 38 assertions: the real `background.js` driven as a black box against a mocked MV3 surface - registration lifecycle, per-tab badge, tab adoption, the shortcut, host matching, corrupt storage |
+| `localhost:8765/test/worker-harness.html` | 32 assertions: the real `background.js` driven as a black box against a mocked MV3 surface - registration lifecycle, badge clearing, tab adoption, the shortcut, host matching, corrupt storage |
 | `localhost:8765/test/test.html?mode=dynamic\|filter\|off` | Visual page with the layout patterns that commonly break dark-mode extensions |
 
 The content and worker harnesses cache-bust their source; the popup harness loads

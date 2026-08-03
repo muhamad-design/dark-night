@@ -1,6 +1,6 @@
 // Dark Night - service worker
-// Owns the keyboard shortcut, the toolbar badge, the pre-paint stylesheet
-// registration, and injection into tabs that were already open.
+// Owns the keyboard shortcut, the pre-paint stylesheet registration, and
+// injection into tabs that were already open.
 
 const DEFAULTS = { enabled: true, disabledSites: [] };
 const EARLY_ID = "dark-night-early";
@@ -8,40 +8,6 @@ const HOSTNAME = /^[a-z0-9.-]+$/i;
 const PAGES = ["http://*/*", "https://*/*"];
 
 const bare = (host) => String(host).replace(/^www\./, "");
-
-// Mirrors siteDisabled() in content.js and matches() in the popup.
-function hostExcluded(host, disabledSites) {
-  const h = bare(host);
-  return disabledSites.some((entry) => {
-    const d = bare(entry);
-    return h === d || h.endsWith("." + d);
-  });
-}
-
-function hostOf(url) {
-  try {
-    const u = new URL(url);
-    return u.protocol === "http:" || u.protocol === "https:" ? u.hostname : null;
-  } catch (e) {
-    return null;
-  }
-}
-
-// The badge answers "why does this page look the way it does": blank when the
-// theme is on, "off" when the master switch is off, "site" when this specific
-// site is excluded. Without the per-site state a successful "Disable for this
-// site" looked identical to nothing having happened.
-async function paintBadge(tab, state) {
-  const host = tab && tab.url ? hostOf(tab.url) : null;
-  let text = "";
-  if (!state.enabled) text = "off";
-  else if (host && hostExcluded(host, state.disabledSites)) text = "site";
-  try {
-    await chrome.action.setBadgeText({ tabId: tab.id, text });
-  } catch (e) {
-    /* the tab closed mid-flight */
-  }
-}
 
 async function readState() {
   const stored = await chrome.storage.sync.get(DEFAULTS);
@@ -51,19 +17,20 @@ async function readState() {
   };
 }
 
-// Self-contained, like the other two steps reconcile() runs: a transient tabs
-// failure must not take the pre-paint registration or tab adoption down with
-// it, and it must not surface as a bare unhandled rejection either.
-async function refreshBadges() {
+// Nothing may cover the toolbar icon, so the extension never shows a badge.
+// This clears any text a previous version left on the action, globally and on
+// the tabs it was painted per-tab.
+async function clearBadges() {
   try {
-    const state = await readState();
-    // The global default covers tabs that never get an explicit update.
-    chrome.action.setBadgeText({ text: state.enabled ? "" : "off" });
-    chrome.action.setBadgeBackgroundColor({ color: "#5c6063" });
-    const tabs = await chrome.tabs.query({ active: true });
-    await Promise.all(tabs.map((tab) => paintBadge(tab, state)));
+    await chrome.action.setBadgeText({ text: "" });
+    const tabs = await chrome.tabs.query({});
+    await Promise.all(
+      tabs.map((tab) =>
+        chrome.action.setBadgeText({ tabId: tab.id, text: "" }).catch(() => {})
+      )
+    );
   } catch (e) {
-    console.warn("Dark Night: badge not updated -", e.message);
+    console.warn("Dark Night: badge not cleared -", e.message);
   }
 }
 
@@ -171,7 +138,7 @@ async function adoptOpenTabsOnce() {
 }
 
 async function reconcile() {
-  await refreshBadges();
+  await clearBadges();
   await syncEarlyCss();
   await adoptOpenTabsOnce();
 }
@@ -192,35 +159,8 @@ chrome.commands.onCommand.addListener((command) => {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "sync") return;
   if (changes.enabled || changes.disabledSites) {
-    refreshBadges();
     syncEarlyCss();
   }
-});
-
-chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-  try {
-    await paintBadge(await chrome.tabs.get(tabId), await readState());
-  } catch (e) {
-    /* tab gone */
-  }
-});
-
-// No filter argument. `properties` is a Firefox extension to this event; Chrome
-// supports no filters here and throws "This event does not support filters"
-// straight out of addListener. At top level that took the entire worker down -
-// registration failed with status 15, and every line below it, both runtime
-// listeners and the reconcile() call, never ran at all. The badge went stale on
-// navigation, the pre-paint stylesheet was never registered and open tabs were
-// never adopted, while the declarative content script kept theming pages, so
-// the extension looked like it was working.
-//
-// The guard therefore lives in the callback: every favicon, title and audible
-// change wakes the worker and is discarded on the next line. That is the cost
-// of the event being unfiltered on this browser, and it is a great deal cheaper
-// than the worker not running.
-chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
-  if (!info.url && info.status !== "complete") return;
-  await paintBadge(tab, await readState());
 });
 
 chrome.runtime.onInstalled.addListener(reconcile);
@@ -228,5 +168,5 @@ chrome.runtime.onStartup.addListener(reconcile);
 
 // Runs on every service-worker start, including the disable/re-enable cycle
 // that fires neither onInstalled nor onStartup and would otherwise leave the
-// badge asserting the opposite of the real state.
+// pre-paint registration out of step with the real state.
 reconcile();

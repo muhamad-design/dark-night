@@ -132,14 +132,10 @@ function makeWorld({ sync = {}, session = {}, tabs = [], injectFails = false, qu
   return w;
 }
 
-const badgeFor = (tabId) => {
-  const hit = [...W.badges].reverse().find((b) => b.tabId === tabId);
-  return hit ? hit.text : "(none)";
-};
-const globalBadge = () => {
-  const hit = [...W.badges].reverse().find((b) => b.tabId === undefined);
-  return hit ? hit.text : "(none)";
-};
+// Nothing may ever cover the toolbar icon, so the only acceptable badge text
+// is the empty string - on the action itself and on every tab.
+const markedBadges = () => W.badges.filter((b) => b.text !== "");
+const clearedTabs = () => W.badges.filter((b) => b.tabId !== undefined).map((b) => b.tabId);
 const early = () => W.registered.find((s) => s.id === "dark-night-early");
 
 const realWarn = console.warn;
@@ -177,8 +173,10 @@ async function run() {
     early().css.join() === "early.css", JSON.stringify(early() && early().matches));
   check("worker: no exclusions means no excludeMatches",
     early() && early().excludeMatches === undefined, JSON.stringify(early() && early().excludeMatches));
-  check("badge: clear when everything is on", globalBadge() === "", globalBadge());
-  check("badge: active tab painted on boot", badgeFor(1) === "", badgeFor(1));
+  check("badge: nothing is painted over the icon on boot",
+    markedBadges().length === 0, JSON.stringify(markedBadges()));
+  check("badge: a stale per-tab badge is cleared on every open tab",
+    JSON.stringify(clearedTabs().sort()) === "[1,2]", JSON.stringify(clearedTabs()));
 
   // --- regression: re-registering on every worker start ---------------------
   // A cold start with an already-correct empty exclusion list must leave the
@@ -199,8 +197,8 @@ async function run() {
   check("per-site: exclusion reaches the pre-paint registration",
     JSON.stringify(early().excludeMatches) === '["*://example.com/*","*://*.example.com/*"]',
     JSON.stringify(early().excludeMatches));
-  check("badge: excluded tab reads 'site'", badgeFor(1) === "site", badgeFor(1));
-  check("badge: unrelated tab is not marked", badgeFor(2) !== "site", badgeFor(2));
+  check("badge: excluding a site still paints nothing",
+    markedBadges().length === 0, JSON.stringify(markedBadges()));
 
   // --- regression: updateContentScripts MERGES, so clearing needs a re-register
   await W.chrome.storage.sync.set({ disabledSites: [] });
@@ -210,7 +208,6 @@ async function run() {
     JSON.stringify(early() && early().excludeMatches));
   check("per-site: it did so by re-registering, not by a merging update",
     W.calls.includes("unregister"), W.calls.join(","));
-  check("badge: clears once the site is re-enabled", badgeFor(1) === "", badgeFor(1));
 
   // --- master switch off ----------------------------------------------------
   await boot(makeWorld({ tabs: TABS }));
@@ -218,11 +215,11 @@ async function run() {
   await W.chrome.storage.sync.set({ enabled: false });
   await waitFor(() => !early());
   check("master off: pre-paint stylesheet is unregistered", !early());
-  check("master off: badge reads 'off'", globalBadge() === "off", globalBadge());
+  check("master off: still nothing painted over the icon",
+    markedBadges().length === 0, JSON.stringify(markedBadges()));
   await W.chrome.storage.sync.set({ enabled: true });
   await waitFor(() => !!early());
   check("master on: registration comes back", !!early());
-  check("master on: badge clears", globalBadge() === "", globalBadge());
 
   // --- adopting tabs that were already open ---------------------------------
   await boot(makeWorld({ tabs: TABS }));
@@ -256,7 +253,7 @@ async function run() {
   check("adopt: and it says why", failing.warnings.some((x) => x.includes("adopt")),
     failing.warnings.join(" | "));
   // regression: reconcile() ran its three steps in one unguarded chain, so a
-  // transient tabs failure in the badge pass cancelled the pre-paint
+  // transient tabs failure in the badge-clearing pass cancelled the pre-paint
   // registration too and surfaced only as an unhandled rejection.
   check("resilience: a failing badge pass does not block the registration",
     !!early(), JSON.stringify(failing.registered));
@@ -281,45 +278,34 @@ async function run() {
     return W.sync.enabled === before;
   })());
 
-  // --- tab events -----------------------------------------------------------
+  // --- the tail of the file -------------------------------------------------
   await boot(makeWorld({ tabs: TABS, sync: { disabledSites: ["docs.google.com"] } }));
   await waitFor(() => early());
   // The regression this replaces: a filter was passed to tabs.onUpdated, Chrome
   // threw, and the worker died mid-file. Everything declared after that line
   // silently vanished, so assert the tail of the file registered - that is what
-  // production actually lost, and it is invisible from the badge alone.
+  // production actually lost.
   check("worker: registration survives to the end of the file",
-    W.listeners.updated.length === 1 &&
+    W.listeners.changed.length === 1 &&
     W.listeners.installed.length === 1 &&
     W.listeners.startup.length === 1,
-    `updated=${W.listeners.updated.length} installed=${W.listeners.installed.length} startup=${W.listeners.startup.length}`);
-  W.listeners.activated.forEach((fn) => fn({ tabId: 2 }));
-  await waitFor(() => badgeFor(2) === "site");
-  check("badge: switching to an excluded tab marks it", badgeFor(2) === "site", badgeFor(2));
-  W.listeners.updated.forEach((fn) => fn(1, { status: "complete" }, TABS[0]));
-  await waitFor(() => badgeFor(1) === "");
-  check("badge: navigating an allowed tab clears it", badgeFor(1) === "", badgeFor(1));
+    `changed=${W.listeners.changed.length} installed=${W.listeners.installed.length} startup=${W.listeners.startup.length}`);
+  check("worker: no tab listeners are held open just to decorate the icon",
+    W.listeners.updated.length === 0 && W.listeners.activated.length === 0,
+    `updated=${W.listeners.updated.length} activated=${W.listeners.activated.length}`);
 
   // --- host matching parity with content.js ---------------------------------
-  await boot(makeWorld({ tabs: [{ id: 1, active: true, url: "https://mail.google.com/" }],
-                         sync: { disabledSites: ["google.com"] } }));
-  await waitFor(() => W.badges.length > 0);
-  check("hosts: a parent-domain rule marks the subdomain tab", badgeFor(1) === "site", badgeFor(1));
+  await boot(makeWorld({ tabs: TABS, sync: { disabledSites: ["google.com"] } }));
+  await waitFor(() => early() && early().excludeMatches);
+  check("hosts: a parent-domain rule also excludes its subdomains",
+    JSON.stringify(early().excludeMatches) === '["*://google.com/*","*://*.google.com/*"]',
+    JSON.stringify(early().excludeMatches));
 
-  await boot(makeWorld({ tabs: [{ id: 1, active: true, url: "https://notexample.com/" }],
-                         sync: { disabledSites: ["example.com"] } }));
-  await waitFor(() => W.badges.length > 0);
-  check("hosts: a lookalike suffix is not treated as a match", badgeFor(1) === "", badgeFor(1));
-
-  await boot(makeWorld({ tabs: [{ id: 1, active: true, url: "https://www.example.com/" }],
-                         sync: { disabledSites: ["example.com"] } }));
-  await waitFor(() => W.badges.length > 0);
-  check("hosts: a leading www. is ignored", badgeFor(1) === "site", badgeFor(1));
-
-  // --- restricted pages -----------------------------------------------------
-  await boot(makeWorld({ tabs: [{ id: 1, active: true, url: "chrome://extensions" }] }));
-  await waitFor(() => W.badges.length > 0);
-  check("restricted: a chrome:// tab gets no per-site marking", badgeFor(1) === "", badgeFor(1));
+  await boot(makeWorld({ tabs: TABS, sync: { disabledSites: ["www.example.com"] } }));
+  await waitFor(() => early() && early().excludeMatches);
+  check("hosts: a leading www. is ignored",
+    JSON.stringify(early().excludeMatches) === '["*://example.com/*","*://*.example.com/*"]',
+    JSON.stringify(early().excludeMatches));
 
   // --- entries that cannot become match patterns ----------------------------
   await boot(makeWorld({ tabs: TABS, sync: { disabledSites: ["example.com", "not a host!", "::1"] } }));
