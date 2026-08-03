@@ -8,6 +8,18 @@ A Manifest V3 Chrome extension that applies a dark theme to any website.
   <img src="screenshots/popup-excluded-sites.png" width="260" alt="Popup with the excluded-sites list open" />
 </p>
 
+## Privacy
+
+Dark Night runs entirely on your device. It has no server, no analytics, no telemetry, and no
+account - there is nothing for it to phone home to. Settings live in `chrome.storage`, synced
+only through your own browser's built-in sync, never through infrastructure of ours.
+
+It is also fully open source: every line that touches your browser - the theming engine, the
+popup, the background worker - is in this repository, so you can read exactly what it does
+instead of taking a store listing's word for it. A lot of "free" dark-mode extensions pay for
+themselves by injecting scripts or reselling browsing data; Dark Night has no mechanism to do
+either, by design.
+
 ## Install
 
 The popup is a React bundle, so it has to be built before Chrome can load it.
