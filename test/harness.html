@@ -255,7 +255,7 @@ async function loadContentScript() {
     `  window.__mm = {
        buildCss, buildDynamicCss, buildFilterCss, cssFilterValue,
        undoFilterValue, effective, mediaUndo,
-       siteDisabled, HOST, DEFAULTS, READY_ATTR, SP, colorIsDark,
+       siteDisabled, HOST, resolveHost, DEFAULTS, READY_ATTR, SP, colorIsDark,
        checkNativeDark, detectTimers,
        appliedFilter, readAncestorFilter, IS_TOP,
        get settings() { return settings; },
@@ -717,8 +717,10 @@ async function mainSuite() {
   await set({ mode: "filter" });
   await tick();
   check("filter: invert applied to html", htmlFilter().includes("invert(1)"), htmlFilter());
-  check("filter: sliders compose after invert",
-    /invert\(1\).*hue-rotate\(180deg\).*brightness\(1\.2\).*contrast\(1\.1\)/.test(htmlFilter()), htmlFilter());
+  // Contrast before brightness, and both after the invert. The order is load
+  // bearing: brightness first clips white before the media rule can protect it.
+  check("filter: sliders compose after invert, contrast before brightness",
+    /invert\(1\).*hue-rotate\(180deg\).*contrast\(1\.1\).*brightness\(1\.2\)/.test(htmlFilter()), htmlFilter());
   // The rule that re-inverts media: the one that both names <img> and applies an
   // invert. Located by shape so it cannot be confused with the top-layer or
   // fullscreen rules, which also set a filter.
@@ -1185,10 +1187,15 @@ async function mainSuite() {
   const contrast = (a) => (v) => a * v + (0.5 - 0.5 * a);
   const SLIDER_PAIRS = [[130, 80], [70, 140], [150, 150], [130, 100], [50, 60], [110, 90]];
   let everWorse = 0, inexactUnclipped = 0, clipped = 0, total = 0;
+  // White specifically, because a photograph's white background is where the
+  // clipping is visible and where the chain order was chosen to protect it.
+  const whiteDrift = [];
   for (const [b, c] of SLIDER_PAIRS) {
-    // Reversal then root filter, in the order they actually reach a pixel.
-    const chain = [contrast(100 / c), bright(100 / b), bright(b / 100), contrast(c / 100)];
-    const root = [bright(b / 100), contrast(c / 100)];
+    // Reversal then root filter, in the order they actually reach a pixel, and
+    // in the order the builders emit them: contrast before brightness forward,
+    // so brightness before contrast in reverse.
+    const chain = [bright(100 / b), contrast(100 / c), contrast(c / 100), bright(b / 100)];
+    const root = [contrast(c / 100), bright(b / 100)];
     for (let i = 0; i <= 255; i++) {
       const v = i / 255;
       total++;
@@ -1202,6 +1209,7 @@ async function mainSuite() {
       if (Math.abs(exempt - v) > Math.abs(bare - v) + 1e-9) everWorse++;
       if (hitTheEdge) clipped++;
       else if (Math.abs(exempt - v) > 1e-6) inexactUnclipped++;
+      if (i === 255) whiteDrift.push([b, c, Math.abs(exempt - v)]);
     }
   }
   // The guarantee: whatever the sliders are set to, media carrying the reversal
@@ -1214,6 +1222,16 @@ async function mainSuite() {
   // can recover; at brightness 50 / contrast 60 white is simply gone.
   check("media: exact for every channel the root filter has not already clipped",
     inexactUnclipped === 0, inexactUnclipped + " inexact of " + (total - clipped) + " unclipped");
+  // A brightened page is the case that matters: it is the setting that used to
+  // blow white out before the media rule could protect it, and the reason the
+  // forward chain puts contrast first. Whenever the page is brightened, the
+  // reversal's own brightness step is a compression and cannot clip, so white
+  // has to come back as white - the visible symptom was a photograph's white
+  // background arriving grey on a site whose photography is mostly white.
+  const brightened = whiteDrift.filter(([b]) => b >= 100);
+  check("media: white survives the reversal exactly on a brightened page",
+    brightened.length > 0 && brightened.every(([, , d]) => d < INVISIBLE),
+    brightened.map(([b, c, d]) => `${b}/${c}:${d.toExponential(1)}`).join(" "));
 
   // Documented limitation, asserted so it cannot quietly become something else:
   // sepia has no inverse among the CSS filter functions, so a warm cast still
@@ -1244,6 +1262,43 @@ async function mainSuite() {
   check("override: a corrupt entry falls back to the shared settings rather than throwing",
     B.effective({ ...B.DEFAULTS, siteOverrides: "not-an-object" }).mode === "dynamic" &&
     B.effective({ ...B.DEFAULTS, siteOverrides: { [B.HOST]: "junk" } }).mode === "dynamic");
+
+  // --- which page a hostless document belongs to ----------------------------
+  // manifest.json sets match_about_blank, so this script also runs in documents
+  // whose URL carries no host at all. Those answered to no per-site rule: every
+  // list check came back false, so a site the user had excluded still had its
+  // about:blank popups themed. A Slack huddle is exactly that - a
+  // window.open("about:blank") whose call controls kept being inverted on an
+  // excluded app.slack.com - which is the case the last three fallbacks cover.
+  const win = (over = {}) => ({ top: over.top, opener: null, parent: null, ...over });
+  const loc = (over = {}) => ({ hostname: "", origin: "null", ancestorOrigins: null, ...over });
+  const self = {};
+  self.top = self;
+  self.parent = self;
+
+  check("host: an ordinary page answers with its own hostname",
+    B.resolveHost(win({ top: self }), loc({ hostname: "www.example.com", origin: "https://www.example.com" })) === "example.com");
+  check("host: a subframe answers with the top frame's, so a page is one theme",
+    B.resolveHost(win({ top: {} }), loc({ hostname: "ads.vendor.com", ancestorOrigins: ["https://example.com"] })) === "example.com");
+  // The inherited origin is the first thing tried: it needs no cross-window
+  // access, so it is the only one a sandboxed or detached document can answer.
+  check("host: an about:blank window inherits the origin that opened it",
+    B.resolveHost(win({ top: self }), loc({ origin: "https://app.slack.com" })) === "app.slack.com");
+  check("host: and falls back to the opener when the origin is opaque",
+    B.resolveHost(win({ top: self, opener: { location: { hostname: "www.app.slack.com" } } }), loc()) === "app.slack.com");
+  check("host: and to the parent when there is no opener",
+    B.resolveHost(win({ top: {}, parent: { location: { hostname: "app.slack.com" } } }), loc()) === "app.slack.com");
+  // A blank tab the user opened themselves belongs to no page, and theming it
+  // is right - what must not happen is inventing a host for it.
+  check("host: a document that belongs to no page resolves to no host",
+    B.resolveHost(win({ top: self }), loc()) === "");
+  // A frame still answers with the top frame's host even when it has one of its
+  // own, so the fallbacks cannot quietly reorder into a subframe answering for
+  // itself - that would split one page across two per-site answers.
+  check("host: the top frame still wins over a subframe's own hostname",
+    B.resolveHost(win({ top: {} }),
+      loc({ hostname: "ads.vendor.com", origin: "https://ads.vendor.com",
+            ancestorOrigins: ["https://outer.com", "https://example.com"] })) === "example.com");
 }
 
 // ---------------------------------------------------------------------------

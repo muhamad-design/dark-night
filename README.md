@@ -3,7 +3,7 @@
 A Manifest V3 Chrome extension that applies a dark theme to any website.
 
 <p>
-  <img src="screenshots/popup-default.png" width="260" alt="Popup default state: dynamic engine, master toggle on" />
+  <img src="screenshots/popup-default.png" width="260" alt="Popup default state: dynamic engine, master toggle on, appearance scoped to all sites" />
   <img src="screenshots/popup-native-dark.png" width="260" alt="Popup on an already-dark page: filter engine, stepped aside automatically" />
   <img src="screenshots/popup-excluded-sites.png" width="260" alt="Popup with the excluded-sites list open" />
 </p>
@@ -35,7 +35,8 @@ npm install && npm run build
 
 Re-run `npm run build` after any change under `popup/src/`. `npm run dev` rebuilds on save;
 there is no dev server, because MV3 forbids remote code and the extension always loads the
-built bundle.
+built bundle. Vite strips types rather than checking them, so `npx tsc --noEmit` is a
+separate step and is the only thing that reads `tsconfig.json`.
 
 `test/` and `popup/src/` are development-only; Chrome ignores them.
 
@@ -136,11 +137,26 @@ front of you is not being painted with. The panel flags such a site as `Custom`,
 `All sites` a hint says the site is using its own settings and not these - the one thing the
 closed trigger cannot say on its own, and the only reason a hint line is still there.
 
+<p>
+  <img src="screenshots/popup-scope.png" width="260" alt="The scope select open on a site that keeps its own settings, showing both options and the Custom flag" />
+</p>
+
 The match is the exact host - `docs.example.com` does not inherit what `example.com` was
 tuned to. That is the opposite of the exclusion list, deliberately: excluding a domain is
 meant to cover everything under it, whereas a tuning is a response to one site's design.
 Only the visual settings are per-site. The master switch, the exclusion list and auto-skip
 stay shared, because they decide *whether* to theme and already have per-site answers.
+
+**A document with no host of its own still belongs to a page.** The content script also runs
+in `about:blank` and `about:srcdoc` documents - `manifest.json` sets `match_about_blank` -
+and those have no hostname to match a per-site rule against. Left there they answered to no
+rule at all, so an excluded site still had its popups themed: a Slack huddle is a
+`window.open("about:blank")`, and its call controls kept being inverted on an
+`app.slack.com` the user had excluded. Such a document is resolved to the page that opened
+it, from its inherited origin first - that needs no cross-window access, so a sandboxed or
+detached document can still answer - then its opener, then its parent. A blank tab that
+genuinely belongs to no page resolves to no host and is themed, which is the right answer
+for an empty tab; what must not happen is inventing a host for it.
 
 ## Images
 
@@ -152,8 +168,7 @@ and contrast do not commute, so the order is load-bearing:
 
 | Root applies | Media carries |
 | --- | --- |
-| `brightness(b)` | `brightness(1/b)` |
-| `contrast(c)` | `contrast(1/c)` |
+| `contrast(c)` then `brightness(b)` | `brightness(1/b)` then `contrast(1/c)` |
 | `grayscale(g)` | `saturate(1/(1-g))` - exact, because the spec defines `grayscale(g)` as `saturate(1-g)` |
 | `sepia(s)` | nothing - see below |
 | `invert(1) hue-rotate(180deg)` | itself; the pair is its own inverse |
@@ -164,13 +179,28 @@ a chain also costs a little more than that term - the reversal telescopes only w
 stays paired - so with sepia in play grayscale stops cancelling exactly either. At the
 default sepia of 0, every term cancels exactly.
 
-Two properties are asserted rather than asserted-to-be-obvious, both in `test/harness.html`:
-the composed matrices land on the identity to within `1e-9`, and - modelling the clamp to
-`[0, 1]` that a browser applies between filter primitives, which the matrix maths omits -
-the reversal never leaves a channel further from its true colour than no reversal would
-have, and is exact for every channel the root filter had not already clipped. What clipping
-costs is a highlight the root filter destroyed before the media rule was reached; at
-brightness 50 / contrast 60, white is simply gone, and no element filter recovers it.
+**The forward chain applies contrast before brightness, and that order is the difference
+between a white photographic background surviving and not.** A browser clamps to `[0, 1]`
+between filter primitives, so the root filter can destroy a channel before the media rule is
+ever reached, and no element filter recovers what has already been clipped. With
+`brightness(130%)` first, every channel above `0.77` is driven to pure white and the
+contrast that follows lands it at `0.9`: a white background arrived grey however exact the
+reversal was. Contrast first compresses toward the middle, which leaves the brightness that
+follows the headroom to land white back on white. It costs a little at the bottom - black
+lifts rather than crushing - which is the cheaper error on a photograph.
+
+Three properties are asserted rather than asserted-to-be-obvious, all in `test/harness.html`:
+the composed matrices land on the identity to within `1e-9`; modelling the clamp the matrix
+maths omits, the reversal never leaves a channel further from its true colour than no
+reversal would have, and is exact for every channel the root filter had not already clipped;
+and white comes back exactly whenever the page is brightened, which is the case the chain
+order exists to protect.
+
+**The limit worth knowing.** Contrast below 100% lifts black on media and nothing can undo
+it: the root filter drives a black channel above zero, and an element filter cannot
+pre-compensate below zero to meet it. Brightness above 100% and contrast at or above 100%
+are fully reversible, so media is left exactly true to colour there. If a site's photography
+matters more than the last few points of page contrast, leave contrast at 100.
 
 Turning the setting on hands media straight to the root filter instead, which in filter mode
 means it inverts along with the page. That is the point of it - a screenshot or a diagram
@@ -332,7 +362,7 @@ python3 -m http.server 8765
 
 | URL | Covers |
 | --- | --- |
-| `localhost:8765/test/harness.html` | 155 assertions: both engines, specificity, shadow DOM (including a real custom-element upgrade), frames, top layer, sliders, toggles, per-site rules and per-site themes, which rules a subframe emits and which it leaves to the top frame, what a frame reports to the frames inside it, the sanitising of that report, liveness-poll gating, self-heal, host matching - and the media reversal, checked as arithmetic: the filter functions are re-implemented as affine maps and the composed chain must land on the identity, against this frame's own filter and against an ancestor's |
+| `localhost:8765/test/harness.html` | 163 assertions: both engines, specificity, shadow DOM (including a real custom-element upgrade), frames, top layer, sliders, toggles, per-site rules and per-site themes, which rules a subframe emits and which it leaves to the top frame, what a frame reports to the frames inside it, the sanitising of that report, liveness-poll gating, self-heal, host matching - including which page a hostless `about:blank` document belongs to - and the media reversal, checked as arithmetic: the filter functions are re-implemented as affine maps and the composed chain must land on the identity, against this frame's own filter and against an ancestor's, then re-checked with the clamp a browser really applies |
 | `localhost:8765/test/harness.html?suite=frames` | 17 assertions: a **real** subframe running the real `content.js` under a top frame running it too. The top frame's engine and sliders reach it over `postMessage`, it re-renders its sheet on receipt, and its media carries the reverse of what the top frame applied - including when the two frames' own settings disagree, which is what an opaque-origin top document produces |
 | `localhost:8765/test/harness.html?suite=orphan` | 9 assertions: the same subframe with **no** extension in the top document, which is what Chrome does with a `file://` or other-extension page around an `http(s)` frame. Nothing answers, so the frame themes itself and compensates for nothing - no lone re-invert, no `color-scheme: light` |
 | `localhost:8765/test/harness.html?suite=pending` | 6 assertions: a settings write landing between the initial storage read and its callback |
