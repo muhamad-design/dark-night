@@ -4,6 +4,11 @@ import { DEFAULTS, sanitize, type Settings } from "@/lib/settings";
 type Patch = Partial<Settings>;
 type Changes = Record<string, { newValue?: unknown }>;
 
+// chrome.storage.sync.get's typings want an index-signature'd bag for its
+// defaults argument. Settings is a closed interface, which is the whole point
+// of it, so the widening happens here once rather than at each read.
+const READ_DEFAULTS = DEFAULTS as unknown as Record<string, unknown>;
+
 export interface SettingsApi {
   settings: Settings;
   loaded: boolean;
@@ -55,7 +60,7 @@ export function useSettings(): SettingsApi {
       // The write was rejected, so the UI is now showing something that is not
       // stored. Re-read the truth rather than leave a lie on screen.
       setStatus("Could not save - retrying from stored settings", true);
-      chrome.storage.sync.get(DEFAULTS, (stored) => setSettings(sanitize(stored)));
+      chrome.storage.sync.get(READ_DEFAULTS, (stored) => setSettings(sanitize(stored)));
     });
   }, [setStatus]);
 
@@ -144,7 +149,7 @@ export function useSettings(): SettingsApi {
     };
     chrome.storage.onChanged.addListener(onChanged);
 
-    chrome.storage.sync.get(DEFAULTS, (stored) => {
+    chrome.storage.sync.get(READ_DEFAULTS, (stored) => {
       setSettings(sanitize(stored));
       chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
         let themable = false;

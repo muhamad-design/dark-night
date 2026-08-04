@@ -9,7 +9,7 @@
     "skipLibCheck": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
-    "baseUrl": ".",
+    "types": ["chrome"],
     "paths": { "@/*": ["./popup/src/*"] }
   },
   "include": ["popup/src"]
