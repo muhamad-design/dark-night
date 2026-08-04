@@ -1242,6 +1242,86 @@ async function mainSuite() {
     isIdentity(then(compose(B.undoFilterValue(sep)), compose(B.cssFilterValue(sep, false)))) > 0.01,
     B.undoFilterValue(sep));
 
+  // --- and the clamp the arithmetic cannot see -------------------------------
+  // The identities above compose matrices with nothing in between, and that gap
+  // is the point: a browser rasterises an element's own filter to 8 bits before
+  // an ancestor's filter reads it, and invert(1) hue-rotate(180deg) takes a
+  // saturated channel outside [0,1] on that intermediate, where it clamps. What
+  // clips there is gone before the root filter runs and no later filter gets it
+  // back, so it is measured through two real rasterisations instead.
+  const ROOT_CHAIN = B.cssFilterValue({ ...B.DEFAULTS, mode: "filter" }, true);
+  const MEDIA_UNDO = B.mediaUndo({ ...B.DEFAULTS, mode: "filter" }, true);
+  // Detached, so none of this reaches the observer or the shadow sweeps.
+  const mini = () => Object.assign(document.createElement("canvas"), { width: 1, height: 1 });
+  const pix = (cv) => cv.getContext("2d", { willReadFrequently: true });
+  // ctx.filter keeps its previous value when a string is rejected, and a chain
+  // that never applied would score perfect, so a rejection is recorded. The flag
+  // is kept apart from the chain because "" is itself rejected, and as a chain
+  // it would read as nothing having been recorded.
+  let rejected = false, rejectedChain = "";
+  const rasterise = (src, chain) => {
+    const cv = mini(), p = pix(cv);
+    p.filter = chain;
+    if (p.filter === "none") { rejected = true; rejectedChain = chain; }
+    p.drawImage(src, 0, 0);
+    return cv;
+  };
+  const roundTrip = (hex, undo) => {
+    const cv = mini(), p = pix(cv);
+    p.fillStyle = hex;
+    p.fillRect(0, 0, 1, 1);
+    const truth = p.getImageData(0, 0, 1, 1).data;
+    const back = pix(rasterise(rasterise(cv, undo), ROOT_CHAIN)).getImageData(0, 0, 1, 1).data;
+    return Math.max(...[0, 1, 2].map((ch) => Math.abs(back[ch] - truth[ch])));
+  };
+  // This is the guarantee that holds, and it is what a themed page is mostly
+  // made of: neutrals and anything muted come off the pair as themselves. The
+  // tolerances sit a step or two above what was measured, so one 8-bit step of
+  // rounding in a future Chrome is not a failure - what they are separating this
+  // from is the saturated case, which is off by 186.
+  const NEUTRALS = [["#ffffff", 1], ["#808080", 1], ["#000000", 1],
+                    ["#7090b0", 1], ["#c08050", 4]];
+  // Measured before the condition is written, because `rejected` says nothing
+  // until a chain has actually been handed to a context - read any earlier and
+  // the guard is the value it was initialised with, and always passes.
+  const drifts = NEUTRALS.map(([hex, tol]) => [hex, roundTrip(hex, MEDIA_UNDO), tol]);
+  check("media: neutral and muted colour come back through both rasterisations",
+    !rejected && drifts.every(([, drift, tol]) => drift <= tol),
+    drifts.map(([hex, drift]) => hex + ":" + drift).join(" ") +
+      (rejected ? " rejected: " + rejectedChain : ""));
+  // Saturated colour is where it stops, and that is pinned rather than hoped
+  // for: pure blue leaves most of a channel in the clamp. If this ever comes
+  // back clean the limitation has been fixed and the claim needs rewriting.
+  check("media: a saturated colour is knowingly lost to the clamp, not nearly kept",
+    roundTrip("#0000ff", MEDIA_UNDO) > 100, "blue off by " + roundTrip("#0000ff", MEDIA_UNDO));
+  // And reordering the pair is not the missing fix - the clamp sits between the
+  // two rasterisations whichever way round the two functions are written.
+  const altOrder = roundTrip("#0000ff", "hue-rotate(180deg) invert(1)");
+  check("media: reordering the invert pair recovers none of it",
+    Math.abs(altOrder - roundTrip("#0000ff", MEDIA_UNDO)) <= 2,
+    "alt " + altOrder + " vs " + roundTrip("#0000ff", MEDIA_UNDO));
+
+  // --- what "theme images and video" governs ---------------------------------
+  // Not css background images. Dropping those is dynamic mode's answer to a
+  // light hero or gradient surviving the colour override, and it is
+  // unconditional - pinned so it cannot quietly be hung off this setting.
+  const themedOff = B.buildDynamicCss({ ...B.DEFAULTS, themeImages: false });
+  const themedOn = B.buildDynamicCss({ ...B.DEFAULTS, themeImages: true });
+  const bgRule = (c) => /\*[^{]*\{\s*background-image: none !important;/.test(c);
+  check("media: css background images are dropped whichever way the setting is set",
+    bgRule(themedOff) && bgRule(themedOn));
+  // At default sliders dynamic mode emits no media filter at all, so the
+  // setting has nothing to act on and the sheet does not move by a byte.
+  check("media: at default sliders the setting has nothing to undo and changes nothing",
+    themedOn === themedOff, themedOn.length + " bytes either way");
+  // Which is arithmetic, not a dead control: move a slider and it is live
+  // again, and this is the check that stops the one above reading otherwise.
+  const tunedThemed = B.buildDynamicCss(
+    { ...B.DEFAULTS, brightness: 130, contrast: 80, themeImages: true });
+  check("media: with a slider moved the setting decides whether media is reversed",
+    tunedThemed !== dynTuned && /filter:/.test(mediaRule(dynTuned)) &&
+    !/img[^{]*\{[^}]*filter:/.test(tunedThemed), norm(mediaRule(dynTuned)));
+
   // --- a site's own theme ----------------------------------------------------
   const withOwn = { ...B.DEFAULTS, mode: "dynamic", brightness: 100,
                     siteOverrides: { [B.HOST]: { mode: "filter", brightness: 130, contrast: 80,

@@ -189,18 +189,22 @@ reversal was. Contrast first compresses toward the middle, which leaves the brig
 follows the headroom to land white back on white. It costs a little at the bottom - black
 lifts rather than crushing - which is the cheaper error on a photograph.
 
-Three properties are asserted rather than asserted-to-be-obvious, all in `test/harness.html`:
-the composed matrices land on the identity to within `1e-9`; modelling the clamp the matrix
-maths omits, the reversal never leaves a channel further from its true colour than no
-reversal would have, and is exact for every channel the root filter had not already clipped;
-and white comes back exactly whenever the page is brightened, which is the case the chain
-order exists to protect.
+Four properties are asserted rather than asserted-to-be-obvious, all in `test/harness.html`:
+the composed matrices land on the identity to within `1e-9`; modelling the brightness and
+contrast clamping the matrix maths omits, the reversal never leaves a channel further from
+its true colour than no reversal would have, and is exact for every channel the root filter
+had not already clipped; white comes back exactly whenever the page is brightened, which is
+the case the chain order exists to protect; and, since no matrix model can see the clamp
+between two rasterisations, the invert pair is measured through real ones - neutral and
+muted colour come back, a saturated one does not.
 
 **The limit worth knowing.** Contrast below 100% lifts black on media and nothing can undo
 it: the root filter drives a black channel above zero, and an element filter cannot
 pre-compensate below zero to meet it. Brightness above 100% and contrast at or above 100%
-are fully reversible, so media is left exactly true to colour there. If a site's photography
-matters more than the last few points of page contrast, leave contrast at 100.
+are fully reversible, so the sliders cost media nothing there. What filter mode's invert pair
+costs a saturated colour is separate, and no slider setting recovers it - see
+[Known limitations](#known-limitations). If a site's photography matters more than the last
+few points of page contrast, leave contrast at 100.
 
 Turning the setting on hands media straight to the root filter instead, which in filter mode
 means it inverts along with the page. That is the point of it - a screenshot or a diagram
@@ -362,7 +366,7 @@ python3 -m http.server 8765
 
 | URL | Covers |
 | --- | --- |
-| `localhost:8765/test/harness.html` | 163 assertions: both engines, specificity, shadow DOM (including a real custom-element upgrade), frames, top layer, sliders, toggles, per-site rules and per-site themes, which rules a subframe emits and which it leaves to the top frame, what a frame reports to the frames inside it, the sanitising of that report, liveness-poll gating, self-heal, host matching - including which page a hostless `about:blank` document belongs to - and the media reversal, checked as arithmetic: the filter functions are re-implemented as affine maps and the composed chain must land on the identity, against this frame's own filter and against an ancestor's, then re-checked with the clamp a browser really applies |
+| `localhost:8765/test/harness.html` | 169 assertions: both engines, specificity, shadow DOM (including a real custom-element upgrade), frames, top layer, sliders, toggles, per-site rules and per-site themes, which rules a subframe emits and which it leaves to the top frame, what a frame reports to the frames inside it, the sanitising of that report, liveness-poll gating, self-heal, host matching - including which page a hostless `about:blank` document belongs to - and the media reversal, checked as arithmetic: the filter functions are re-implemented as affine maps and the composed chain must land on the identity, against this frame's own filter and against an ancestor's, then re-checked against the brightness and contrast clamping a browser applies - and, because that model cannot see the invert pair, measured through two real rasterisations, where a neutral survives and a saturated colour is pinned as knowingly lost |
 | `localhost:8765/test/harness.html?suite=frames` | 17 assertions: a **real** subframe running the real `content.js` under a top frame running it too. The top frame's engine and sliders reach it over `postMessage`, it re-renders its sheet on receipt, and its media carries the reverse of what the top frame applied - including when the two frames' own settings disagree, which is what an opaque-origin top document produces |
 | `localhost:8765/test/harness.html?suite=orphan` | 9 assertions: the same subframe with **no** extension in the top document, which is what Chrome does with a `file://` or other-extension page around an `http(s)` frame. Nothing answers, so the frame themes itself and compensates for nothing - no lone re-invert, no `color-scheme: light` |
 | `localhost:8765/test/harness.html?suite=pending` | 6 assertions: a settings write landing between the initial storage read and its callback |
@@ -388,7 +392,10 @@ confirm that.
 - **Dynamic mode drops CSS background images on elements** (gradients, hero images, sprite
   icons set via `background-image`). Without this, a light gradient survives the color
   override and leaves near-white text on a near-white band. Sprite icons on `::before` /
-  `::after` are preserved. Filter mode keeps all backgrounds.
+  `::after` are preserved. Filter mode keeps all backgrounds. `Theme images and video` does
+  not govern this rule - the drop is emitted either way, so a hero photo, logo or avatar
+  painted via `background-image` is dropped in dynamic mode whatever that setting says. It
+  governs `<img>`, `<video>`, `<embed>` and `<object>` elements, which is a different thing.
 - **Dynamic mode no longer repaints `::before` / `::after` backgrounds**, so a pseudo-element
   the site uses as a full-bleed light overlay stays light. Painting them dark instead turned
   every accent bar, tooltip arrow and toggle knob into an opaque block, which was worse;
@@ -405,6 +412,19 @@ confirm that.
 - **Closed shadow roots are unreachable**, by design of the platform. Open roots are themed.
 - **Photographic canvases render inverted in filter mode** - the cost of treating canvas as
   an application surface. Use dynamic mode, or exclude the site.
+- **Filter mode cannot return a saturated color in media to its true value**, and it is the
+  invert pair that loses it rather than the brightness and contrast reversal. White, grey, a
+  steel blue and a skin tone come back within 2 of 255 per channel, measured; pure blue lands
+  186 of 255 from the truth, saturated yellow and red are visibly shifted, and a blue holds
+  only to roughly 50% saturation. Which hue is asked for matters as much as how saturated it
+  is - a fully saturated magenta comes back within 21 of 255, where the blue above is 186. A
+  browser rasterizes an element's own filter to 8 bits before an ancestor's reads it, and on
+  that intermediate `invert(1) hue-rotate(180deg)` drives a saturated channel outside the
+  representable range, where it clamps; that clamp is the step the composed matrices omit,
+  and what clips there is gone before the root filter runs. No ordering of the pair recovers
+  it and no CSS filter can, so it is inherent to filter mode. Dynamic mode never inverts, so
+  media never meets this clamp - a moved slider still filters it, but only into the contrast
+  case under [Images](#images), which is a slider setting away rather than inherent.
 - **Filter mode inverts `position: fixed` layering** on some sites, and moving a slider in
   dynamic mode applies a filter to `<html>`, which makes it a containing block for fixed
   elements. Both are inherent to CSS filters.
