@@ -145,6 +145,27 @@ const tab = (name) => $$('[role="tab"]').find((t) => t.textContent.trim() === na
 const slider = (key) => $(`[data-slider="${key}"] [role="slider"]`);
 const key = (el, k) => el.dispatchEvent(new win.KeyboardEvent("keydown", { key: k, bubbles: true }));
 
+// The scope picker is a select, not a tablist: a closed trigger reading
+// "Editing <set>", and a panel of options only while it is open. The panel
+// keeps a hidden copy of its items mounted to hold their labels, so options are
+// only ever looked up inside the open listbox.
+const scopeTrigger = () => $('#scopeRow button[aria-haspopup="listbox"]');
+const scopeLabel = () => (scopeTrigger() ? scopeTrigger().textContent.trim().replace(/^Editing\s*/, "") : "(missing)");
+const option = (name) => $$('[role="listbox"] [role="option"]').find((o) => o.textContent.includes(name));
+// The trigger is unmounted while the panel is open - it morphs into it - so the
+// trigger's absence is "open" and its return is "closed". Waiting on the
+// panel's own removal instead would be waiting on an exit animation to finish,
+// and rAF stalls in a backgrounded tab: the same reason nothing in this popup
+// gates content on an entrance animation.
+async function pickScope(name) {
+  if (scopeTrigger()) {
+    scopeTrigger().click();
+    await waitFor(() => !!option(name));
+  }
+  option(name).click();
+  await waitFor(() => !!scopeTrigger() && scopeLabel() === name);
+}
+
 // ---------------------------------------------------------------------------
 async function run() {
   const CLEAN = { enabled: true, mode: "dynamic", brightness: 100, contrast: 100,
@@ -186,17 +207,20 @@ async function run() {
     settle.every((x) => x === settle[0]) && JSON.parse(settle[0]).hint === "1", settle.join(" -> "));
   check("open: no skeleton once settings are loaded", !$("#skeleton"));
 
-  // --- the segmented pickers fill the width ---------------------------------
-  // Both of them: the scope picker and the engine picker are the same control
-  // with different labels, and a layout that only holds for one of them is a
-  // layout that holds by accident.
-  for (const row of ["#scopeRow", "#engineRow"]) {
-    const listW = $(`${row} [role="tablist"]`).getBoundingClientRect().width;
-    const tabW = $$(`${row} [role="tab"]`).map((t) => t.getBoundingClientRect().width);
-    check(`tabs: ${row} triggers are equal width`,
+  // --- the segmented picker fills the width ---------------------------------
+  // The engine picker is the only segmented control in the popup. The scope
+  // used to be a second one directly above it, which is what made the two read
+  // as the same decision - so the assertion that matters as much as the widths
+  // is that no other tablist came back.
+  {
+    const listW = $('#engineRow [role="tablist"]').getBoundingClientRect().width;
+    const tabW = $$('#engineRow [role="tab"]').map((t) => t.getBoundingClientRect().width);
+    check("tabs: engine triggers are equal width",
       Math.abs(tabW[0] - tabW[1]) < 2, tabW.map(Math.round).join(" / "));
-    check(`tabs: ${row} triggers fill the row`,
+    check("tabs: engine triggers fill the row",
       tabW[0] + tabW[1] > listW - 12, Math.round(tabW[0] + tabW[1]) + " of " + Math.round(listW));
+    check("tabs: the engine picker is the only tablist in the popup",
+      $$('[role="tablist"]').length === 1, $$('[role="tablist"]').length);
   }
 
   // --- sliders show their steps --------------------------------------------
@@ -218,9 +242,14 @@ async function run() {
   check("ui: engine picker is a tablist",
     !!$('#engineRow [role="tablist"]') && $$('#engineRow [role="tab"]').length === 2,
     $$('#engineRow [role="tab"]').length);
-  check("ui: scope picker is a tablist of its own",
-    !!$('#scopeRow [role="tablist"]') && $$('#scopeRow [role="tab"]').length === 2,
-    $$('#scopeRow [role="tab"]').length);
+  check("ui: scope picker is a select, not a second tablist",
+    !!scopeTrigger() && !$('#scopeRow [role="tab"]'), scopeLabel());
+  // A closed trigger has to say which set it edits. An invisible mode is what
+  // the segmented control was replaced for.
+  check("ui: the closed scope trigger names the set being edited",
+    scopeTrigger().textContent.trim() === "Editing All sites", scopeTrigger().textContent.trim());
+  check("ui: the scope options are not in the tree until the panel is open",
+    !$('[role="listbox"]'));
   check("ui: sliders expose the slider role", $$('[role="slider"]').length === 4);
   check("ui: slider carries its value in aria",
     slider("brightness").getAttribute("aria-valuenow") === "100",
@@ -321,14 +350,24 @@ async function run() {
   // as much - what did not.
   await mount(CLEAN, "https://mail.google.com/");
   check("scope: opens on the shared settings when the site has none of its own",
-    tab("All sites").getAttribute("aria-selected") === "true");
+    scopeLabel() === "All sites", scopeLabel());
   check("scope: the reset button offers the shared reset",
     txt("#reset") === "Reset sliders", txt("#reset"));
+  // Both options carry their own explanation, so the choice is made with the
+  // meaning of each in front of you rather than from two bare labels.
+  scopeTrigger().click();
+  await waitFor(() => !!option("All sites"));
+  check("scope: the panel explains what each set covers",
+    option("All sites").textContent.includes("Every site without its own") &&
+    option("mail.google.com").textContent.includes("This site only"),
+    option("mail.google.com").textContent.trim());
+  check("scope: a site with nothing saved is not flagged as custom",
+    !option("mail.google.com").textContent.includes("Custom"),
+    option("mail.google.com").textContent.trim());
 
-  tab("This site").click();
-  await waitFor(() => tab("This site").getAttribute("aria-selected") === "true");
-  check("scope: the hint names the site it would save against",
-    txt("#scopeHint").includes("mail.google.com"), txt("#scopeHint"));
+  await pickScope("mail.google.com");
+  check("scope: the trigger names the site it would save against",
+    scopeLabel() === "mail.google.com", scopeLabel());
   // Nothing is saved yet, so there is nothing to clear - and a button that
   // looks live but does nothing is worse than one that says it cannot.
   check("scope: nothing to clear before anything is saved", $("#reset").disabled === true);
@@ -358,9 +397,9 @@ async function run() {
   await waitFor(() => !store.siteOverrides["mail.google.com"]);
   check("scope: clearing removes the site's entry",
     JSON.stringify(store.siteOverrides) === "{}", JSON.stringify(store.siteOverrides));
-  await waitFor(() => tab("All sites").getAttribute("aria-selected") === "true");
+  await waitFor(() => scopeLabel() === "All sites");
   check("scope: clearing drops back to the shared settings rather than an empty scope",
-    tab("All sites").getAttribute("aria-selected") === "true");
+    scopeLabel() === "All sites", scopeLabel());
   check("scope: the shared values are what is on screen again",
     slider("brightness").getAttribute("aria-valuenow") === "100",
     slider("brightness").getAttribute("aria-valuenow"));
@@ -371,26 +410,37 @@ async function run() {
     mode: "filter", brightness: 130, contrast: 80, sepia: 0, grayscale: 0, themeImages: true } } },
     "https://mail.google.com/");
   check("scope: a site with its own settings opens in its own scope",
-    tab("This site").getAttribute("aria-selected") === "true");
+    scopeLabel() === "mail.google.com", scopeLabel());
   check("scope: and shows them, not the shared ones",
     slider("brightness").getAttribute("aria-valuenow") === "130" &&
     tab("Filter").getAttribute("aria-selected") === "true",
     slider("brightness").getAttribute("aria-valuenow"));
-  tab("All sites").click();
+  // The one thing a closed trigger reading "All sites" cannot say on its own is
+  // that the page in front of you is not painted with what is on screen.
+  await pickScope("All sites");
   await waitFor(() => slider("brightness").getAttribute("aria-valuenow") === "100");
   check("scope: switching back shows the shared values",
     slider("brightness").getAttribute("aria-valuenow") === "100" &&
     tab("Dynamic").getAttribute("aria-selected") === "true");
   check("scope: and says the site is still keeping its own",
     txt("#scopeHint").includes("mail.google.com"), txt("#scopeHint"));
+  scopeTrigger().click();
+  await waitFor(() => !!option("mail.google.com"));
+  check("scope: the panel flags a site that already has its own set",
+    option("mail.google.com").textContent.includes("Custom"),
+    option("mail.google.com").textContent.trim());
+  key(win.document.body, "Escape");
+  await waitFor(() => !!scopeTrigger());
+  check("scope: escape closes the panel without changing the set",
+    !!scopeTrigger() && scopeLabel() === "All sites", scopeLabel());
 
   // Another site must not pick up this one's theme - the match is the exact
   // host, unlike the exclusion list, which matches suffixes on purpose.
   await mount({ ...CLEAN, siteOverrides: { "example.com": { mode: "filter", brightness: 130,
     contrast: 80, sepia: 0, grayscale: 0, themeImages: false } } }, "https://docs.example.com/");
   check("scope: a subdomain does not inherit the parent's theme",
-    tab("All sites").getAttribute("aria-selected") === "true" &&
-    slider("brightness").getAttribute("aria-valuenow") === "100");
+    scopeLabel() === "All sites" &&
+    slider("brightness").getAttribute("aria-valuenow") === "100", scopeLabel());
 
   // There is no site to scope to on a chrome:// page, so the picker would be
   // offering a choice with one real option.
@@ -413,8 +463,7 @@ async function run() {
 
   // It is one of the values a site can keep its own copy of, so it has to route
   // through the scope like the sliders and the engine do.
-  tab("This site").click();
-  await waitFor(() => tab("This site").getAttribute("aria-selected") === "true");
+  await pickScope("example.com");
   $('#themeImagesRow [role="checkbox"]').click();
   await waitFor(() => !!(store.siteOverrides && store.siteOverrides["example.com"]));
   check("images: in site scope it lands in the override",

@@ -3,6 +3,13 @@ import { useEffect, useRef, useState } from "react";
 import { Switch } from "@/components/motion/switch";
 import { Checkbox } from "@/components/motion/checkbox";
 import { Tabs, TabsList, TabsTrigger } from "@/components/motion/tabs";
+import {
+  MorphSelect,
+  MorphSelectContent,
+  MorphSelectItem,
+  MorphSelectTrigger,
+  MorphSelectValue
+} from "@/components/motion/select-morph";
 import { RangeSlider } from "@/components/motion/range-slider";
 import { Button } from "@/components/motion/button/base";
 import { TextShimmer } from "@/components/motion/text-shimmer";
@@ -257,35 +264,64 @@ export default function App() {
         )}
       </section>
 
-      {/* Scope ----------------------------------------------------------- */}
-      {/* Only where there is a site to scope to. On a chrome:// page the picker
-          would offer a choice with one real option. */}
-      {host && (
-        <section id="scopeRow" className="border-b border-border px-4 py-3" inert={off ? true : undefined}>
-          <Tabs value={scope} onValueChange={(v) => setScopePick(v as Scope)} variant="segment">
-            <TabsList className="flex w-full [&>div]:flex-1 [&>div]:basis-0">
-              <TabsTrigger value="global" className="w-full">
-                All sites
-              </TabsTrigger>
-              <TabsTrigger value="site" className="w-full">
-                This site
-              </TabsTrigger>
-            </TabsList>
-          </Tabs>
-          <p id="scopeHint" className="mt-2 text-[11px] leading-snug text-muted-foreground">
-            <span key={scope} className="block">
-              {scope === "site"
-                ? `Engine, sliders and images for ${host} only.`
-                : override
-                  ? `${host} has its own settings - switch to This site to edit them.`
-                  : "Engine, sliders and images for every site without its own."}
-            </span>
-          </p>
-        </section>
-      )}
-
-      {/* Engine --------------------------------------------------------- */}
+      {/* Appearance ----------------------------------------------------- */}
       <section id="engineRow" className="border-b border-border px-4 py-3" inert={off ? true : undefined}>
+        {/* The scope belongs to this section, so it is drawn as this section's
+            header rather than as another full-width bar. A segmented control
+            here read as a peer of the engine picker below it - same shape, same
+            width - when one picks a value and the other picks what the value is
+            written to. Only where there is a site to scope to: on a chrome://
+            page the choice would have one real option. */}
+        {host && (
+          <div id="scopeRow" className="mb-2.5 flex items-center justify-between gap-2">
+            <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground">
+              Appearance
+            </span>
+            <MorphSelect
+              value={scope}
+              onValueChange={(v) => setScopePick(v as Scope)}
+              className="max-w-[196px]"
+            >
+              <MorphSelectTrigger>
+                <span className="text-muted-foreground">Editing </span>
+                <MorphSelectValue className={scope === "site" ? "font-mono" : undefined} />
+              </MorphSelectTrigger>
+              <MorphSelectContent className="w-[244px]">
+                <MorphSelectItem value="global" label="All sites">
+                  <span className="flex min-w-0 flex-col">
+                    <span className="text-foreground">All sites</span>
+                    <span className="text-[11px] leading-snug text-muted-foreground">
+                      Every site without its own
+                    </span>
+                  </span>
+                </MorphSelectItem>
+                <MorphSelectItem value="site" label={host}>
+                  <span className="flex min-w-0 flex-col">
+                    <span className="flex items-center gap-1.5">
+                      <span className="truncate font-mono text-foreground">{host}</span>
+                      {override && (
+                        <span className="shrink-0 rounded-full bg-accent/15 px-1.5 py-px font-mono text-[9px] uppercase tracking-wider text-accent">
+                          Custom
+                        </span>
+                      )}
+                    </span>
+                    <span className="text-[11px] leading-snug text-muted-foreground">
+                      This site only
+                    </span>
+                  </span>
+                </MorphSelectItem>
+              </MorphSelectContent>
+            </MorphSelect>
+          </div>
+        )}
+        {/* The one thing the closed trigger cannot say on its own: these are not
+            the values the page in front of you is painted with. Every other
+            state is already spelled out by the trigger or by the panel. */}
+        {scope === "global" && override && host && (
+          <p id="scopeHint" className="mb-2.5 text-[11px] leading-snug text-muted-foreground">
+            {host} is using its own settings, not these.
+          </p>
+        )}
         <Tabs
           value={view.mode}
           onValueChange={(v) => setTheme({ mode: v as Mode })}

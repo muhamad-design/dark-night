@@ -47,7 +47,7 @@ not reimplementations bolted onto stock HTML elements:
 | Surface | Component |
 | --- | --- |
 | Master toggle | `Switch` - spring thumb, `stiffness 800 / damping 80 / mass 4`, squish on press |
-| All sites / This site | `Tabs` (segment) - the same control as the engine picker, so "which settings am I editing" reads the same way as "which engine is on" |
+| Editing All sites / this site | `MorphSelect` - the trigger grows into its own panel on a shared `layoutId`. Deliberately *not* the engine picker's control: see below |
 | Dynamic / Filter | `Tabs` (segment) - `layoutId` indicator on a `170 / 24 / 1.2` spring |
 | The four sliders | `RangeSlider` - `role="slider"`, tick dots per step, glide-tracked fill |
 | Site and reset actions | `Button` - press-scale feedback |
@@ -82,7 +82,7 @@ SIL Open Font License 1.1; the licence travels with the fonts.
 | Toolbar toggle | Master on/off. |
 | `Alt+Shift+D` | Same toggle, from the keyboard. |
 | Disable for this site | Per-site opt-out. Matches subdomains, and ignores a leading `www.` |
-| All sites / This site | Which set of settings the controls below it are editing (below). |
+| Editing ... | The `Appearance` section's header: which set of settings that section is editing (below). |
 | Dynamic / Filter | The two theming engines (below). |
 | Sliders | Brightness, contrast, sepia, grayscale - applied in both engines. Stepped in 10s, so the slider draws a tick per step (it stops drawing them past 50 steps, which a finer step would exceed). |
 | Theme images and video | Off by default: photos, video and plugin surfaces keep their real colours (below). |
@@ -111,20 +111,30 @@ than showing a state that was never saved.
 ## A site's own settings
 
 Some sites need a different engine or a different brightness than the rest of the web, and
-tuning for one of them should not retune every other. The `All sites` / `This site` picker
-decides which set an edit lands in: the engine, the four sliders and the image rule, saved
-either once for everything or separately for the host in front of you.
+tuning for one of them should not retune every other. The `Editing` select in the
+`Appearance` header decides which set an edit lands in: the engine, the four sliders and
+the image rule, saved either once for everything or separately for the host in front of you.
 
-Switching to `This site` shows the shared values until the first edit, which is what
-snapshots them into the site's own set - all six at once, never a partial copy. A partial
-one would silently follow later changes to the shared settings for whichever keys it
-happened not to hold, which is not what "only for this site" means. `Clear site settings`
-removes the set and drops the site back to the shared values; the popup then reopens in
-`All sites`, because a scope with nothing in it is not a state worth showing.
+**It is a select, and it sits in a section header, on purpose.** It was a segmented control
+directly above the engine picker - the same shape, the same width, two labels each. But the
+engine picker chooses a *value*, and this chooses *what the value is written to*, and
+nothing below it visibly moves when it changes. Two identical bars for two different kinds
+of decision is the confusion; worse, in `This site` before the first edit there is no set
+yet, so both halves of the bar showed the same numbers. A smaller control, at a different
+level, labelling the section it governs, cannot be read as a peer of the picker under it -
+and its panel spells out what each set covers instead of leaving two bare labels to carry it.
+
+Picking the site shows the shared values until the first edit, which is what snapshots them
+into the site's own set - all six at once, never a partial copy. A partial one would
+silently follow later changes to the shared settings for whichever keys it happened not to
+hold, which is not what "only for this site" means. `Clear site settings` removes the set
+and drops the site back to the shared values; the popup then reopens on `All sites`,
+because a scope with nothing in it is not a state worth showing.
 
 A site that has its own settings opens showing them, rather than showing values the page in
-front of you is not being painted with. From `All sites` the hint says so, so the set is
-never invisible.
+front of you is not being painted with. The panel flags such a site as `Custom`, and from
+`All sites` a hint says the site is using its own settings and not these - the one thing the
+closed trigger cannot say on its own, and the only reason a hint line is still there.
 
 The match is the exact host - `docs.example.com` does not inherit what `example.com` was
 tuned to. That is the opposite of the exclusion list, deliberately: excluding a domain is
@@ -331,7 +341,7 @@ python3 -m http.server 8765
 | `localhost:8765/test/harness.html?suite=hint` | 8 assertions: a remembered verdict seeds the load before the settings arrive, and a stale one is corrected by the measurement rather than believed |
 | `localhost:8765/test/harness.html?suite=invalidated` | 7 assertions: the frame reclaiming itself when the extension is reloaded out from under it. The scheduled rechecks reach `chrome.storage` at 1s and 3s, well inside the 5s liveness poll - and on a page the engine stepped aside from that poll is not running at all |
 | `localhost:8765/test/perf-bench.html` | Style-resolution cost of the real dynamic sheet on a ~9,500-element DOM, and a guard on the specificity booster: it must stay cascade-identical to the chained form and beat it head-to-head |
-| `localhost:8765/test/popup-harness.html` | 111 assertions: the **built** React popup against a mocked `chrome`, including UI component wiring, rejected writes, external changes, corrupt settings, the scope picker and what an edit in each scope does and does not move, the image toggle, and the native-dark banner with its parent-rule disclosure and policy re-query |
+| `localhost:8765/test/popup-harness.html` | 116 assertions: the **built** React popup against a mocked `chrome`, including UI component wiring, rejected writes, external changes, corrupt settings, the scope select - that it is not a second tablist, that a closed trigger names the set it edits, and what an edit in each scope does and does not move - the image toggle, and the native-dark banner with its parent-rule disclosure and policy re-query |
 | `localhost:8765/test/worker-harness.html` | 32 assertions: the real `background.js` driven as a black box against a mocked MV3 surface - registration lifecycle, badge clearing, tab adoption, the shortcut, host matching, corrupt storage |
 | `localhost:8765/test/test.html?mode=dynamic\|filter\|off` | Visual page with the layout patterns that commonly break dark-mode extensions |
 
