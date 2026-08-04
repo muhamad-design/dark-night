@@ -62,18 +62,54 @@
 
   // The host cannot change without a navigation, which reloads this script,
   // so resolve it once instead of on every mutation.
-  const HOST = (() => {
-    let host = location.hostname;
+  const bareHost = (h) => (h || "").replace(/^www\./, "");
+
+  function resolveHost(win, loc) {
     try {
-      const origins = location.ancestorOrigins;
-      if (window.top !== window && origins && origins.length) {
-        host = new URL(origins[origins.length - 1]).hostname;
+      const origins = loc.ancestorOrigins;
+      if (win.top !== win && origins && origins.length) {
+        const top = new URL(origins[origins.length - 1]).hostname;
+        if (top) return bareHost(top);
       }
     } catch (e) {
       /* opaque or cross-origin ancestor - fall back to our own hostname */
     }
-    return host.replace(/^www\./, "");
-  })();
+    if (loc.hostname) return bareHost(loc.hostname);
+
+    // No hostname of our own: an about:blank or about:srcdoc document. The URL
+    // has no host to match a per-site rule against, but such a document is not
+    // a site in its own right either - it was opened by one, inherits that
+    // one's origin, and is painted as part of it. Without this it answered to
+    // no rule at all, so a site the user had excluded still had its popups
+    // themed: a Slack huddle is exactly this, a window.open("about:blank")
+    // whose call controls kept being inverted on an excluded app.slack.com.
+    //
+    // manifest.json sets match_about_blank, so this script runs there; the
+    // three sources below are every way such a document can name the page it
+    // belongs to. location.origin first: it is the inherited origin itself,
+    // needs no cross-window access, and is the only one a sandboxed or
+    // detached document can still answer.
+    try {
+      const inherited = new URL(loc.origin).hostname;
+      if (inherited) return bareHost(inherited);
+    } catch (e) {
+      /* "null" for a genuinely opaque origin - nothing to inherit */
+    }
+    for (const related of [
+      () => win.opener && win.opener.location.hostname,
+      () => win.parent !== win && win.parent.location.hostname
+    ]) {
+      try {
+        const host = related();
+        if (host) return bareHost(host);
+      } catch (e) {
+        /* cross-origin, or gone - try the next one */
+      }
+    }
+    return "";
+  }
+
+  const HOST = resolveHost(window, location);
 
   function hostInList(list) {
     return list.some((entry) => {
@@ -125,11 +161,26 @@
   // that never corrects itself.
   let ancestorFilter = null;
 
+  // Contrast before brightness, which is not the order it reads in the popup and
+  // is not cosmetic. A browser clamps to [0,1] between filter primitives, so the
+  // forward chain can destroy a channel before the media reversal ever runs -
+  // and no element filter can bring back what the root filter already clipped.
+  //
+  // brightness(130%) first drives every channel above 0.77 to pure white, and
+  // the contrast that follows lands it at 0.9: a white photographic background
+  // came out grey however exact the reversal was. Contrast first compresses
+  // toward the middle, which leaves the brightness that follows the headroom to
+  // land white back on white. Measured across the swatch set, this is the
+  // difference between white returning as #e3e3e3 and returning as #ffffff.
+  //
+  // It costs a little at the bottom - black lifts rather than crushing - which
+  // is the cheaper error on photographs, and the one a viewer reads as "slightly
+  // washed" rather than "wrong colour".
   function cssFilterValue(s, withInvert) {
     const parts = [];
     if (withInvert) parts.push("invert(1)", "hue-rotate(180deg)");
-    if (s.brightness !== 100) parts.push(`brightness(${s.brightness}%)`);
     if (s.contrast !== 100) parts.push(`contrast(${s.contrast}%)`);
+    if (s.brightness !== 100) parts.push(`brightness(${s.brightness}%)`);
     if (s.sepia !== 0) parts.push(`sepia(${s.sepia}%)`);
     if (s.grayscale !== 0) parts.push(`grayscale(${s.grayscale}%)`);
     return parts.join(" ");
@@ -141,7 +192,9 @@
   // is the only way to exempt anything from an ancestor filter in CSS.
   //
   // Reversing a chain reverses its order as well as each function, and
-  // brightness and contrast do not commute, so the order here is not cosmetic:
+  // brightness and contrast do not commute, so the order here is not cosmetic.
+  // It is the mirror of cssFilterValue's contrast-then-brightness, which means
+  // brightness comes first here:
   //   brightness(b) -> brightness(1/b)
   //   contrast(c)   -> contrast(1/c)
   //   grayscale(g)  -> saturate(1/(1-g)), exact because the spec defines
@@ -170,8 +223,8 @@
     if (s.grayscale !== 0 && s.grayscale < 100) {
       parts.push(`saturate(${pct(10000 / (100 - s.grayscale))})`);
     }
-    if (s.contrast !== 100) parts.push(`contrast(${pct(10000 / s.contrast)})`);
     if (s.brightness !== 100) parts.push(`brightness(${pct(10000 / s.brightness)})`);
+    if (s.contrast !== 100) parts.push(`contrast(${pct(10000 / s.contrast)})`);
     return parts.join(" ");
   }
 
