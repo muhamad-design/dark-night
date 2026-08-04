@@ -274,15 +274,27 @@ async function run() {
   check("per-site: click again re-enables",
     JSON.stringify(store.disabledSites) === "[]", JSON.stringify(store.disabledSites));
 
-  // --- regression: enabling a subdomain deleted the parent's exclusion -------
+  // --- subdomains are separate sites ----------------------------------------
   await mount({ ...CLEAN, disabledSites: ["example.com", "other.com"] }, "https://docs.example.com/x");
-  check("subdomain: parent exclusion is reported, not silently owned",
-    txt("#siteToggle") === "Enable example.com", txt("#siteToggle"));
-  check("subdomain: the reason is spelled out", txt("#siteNote").includes("example.com"), txt("#siteNote"));
+  check("subdomain: parent exclusion does not cover this host",
+    txt("#siteToggle") === "Disable for this site", txt("#siteToggle"));
+  check("subdomain: no parent-rule note", !$("#siteNote") || !txt("#siteNote").includes("example.com"),
+    txt("#siteNote"));
   $("#siteToggle").click();
-  await waitFor(() => !store.disabledSites.includes("example.com"));
-  check("subdomain: removing it takes only the parent entry, unrelated sites survive",
-    JSON.stringify(store.disabledSites) === '["other.com"]', JSON.stringify(store.disabledSites));
+  await waitFor(() => store.disabledSites.includes("docs.example.com"));
+  check("subdomain: excluding adds this host only; parent and siblings stay",
+    JSON.stringify(store.disabledSites) === '["example.com","other.com","docs.example.com"]',
+    JSON.stringify(store.disabledSites));
+
+  await mount({ ...CLEAN, disabledSites: ["mail.google.com"] }, "https://google.com/");
+  check("subdomain: mail.google.com exclusion does not affect google.com",
+    txt("#siteToggle") === "Disable for this site", txt("#siteToggle"));
+  await mount({ ...CLEAN, disabledSites: ["google.com"] }, "https://mail.google.com/");
+  check("subdomain: google.com exclusion does not affect mail.google.com",
+    txt("#siteToggle") === "Disable for this site", txt("#siteToggle"));
+  await mount({ ...CLEAN, disabledSites: ["google.com"] }, "https://www.google.com/");
+  check("subdomain: www.google.com still shares google.com",
+    txt("#siteToggle") === "Enable for this site", txt("#siteToggle"));
 
   // --- regression: every arrow key press was its own storage write ----------
   await mount(CLEAN, "https://example.com/");
@@ -434,8 +446,8 @@ async function run() {
   check("scope: escape closes the panel without changing the set",
     !!scopeTrigger() && scopeLabel() === "All sites", scopeLabel());
 
-  // Another site must not pick up this one's theme - the match is the exact
-  // host, unlike the exclusion list, which matches suffixes on purpose.
+  // Another site must not pick up this one's theme - exact host for both
+  // theme overrides and exclusions (mail.google.com ≠ google.com).
   await mount({ ...CLEAN, siteOverrides: { "example.com": { mode: "filter", brightness: 130,
     contrast: 80, sepia: 0, grayscale: 0, themeImages: false } } }, "https://docs.example.com/");
   check("scope: a subdomain does not inherit the parent's theme",
@@ -548,23 +560,23 @@ async function run() {
   await waitFor(() => !$("#nativeDarkNote"));
   check("nativedark: banner hidden while auto-skip is off", !$("#nativeDarkNote"));
 
-  // --- "Step aside" must not claim success a parent entry contradicts --------
-  // An exact entry wins over a parent one, so removing it can leave the site
-  // still force-themed. Saying "Stepped aside" while the forced banner is still
-  // on screen is the popup contradicting itself.
+  // --- "Step aside" only removes this host; siblings stay forced -------------
+  // Parent domains no longer cover subdomains, so removing docs.example.com
+  // while example.com is also listed fully releases this host.
   await mount({ ...CLEAN, forcedSites: ["docs.example.com", "example.com"] },
     "https://docs.example.com/", true);
   check("nativedark: exact forced entry is the one offered",
     !!$("#forcedNote"), txt("#forcedNote"));
   $("#unforceSite").click();
   await waitFor(() => !store.forcedSites.includes("docs.example.com"));
-  check("nativedark: only the exact entry is removed",
+  check("nativedark: only this host's force entry is removed",
     JSON.stringify(store.forcedSites) === '["example.com"]', JSON.stringify(store.forcedSites));
   await waitFor(() => txt("#status").length > 0);
-  check("nativedark: the parent rule that still applies is named, not hidden",
-    txt("#status").includes("example.com") && !txt("#status").startsWith("Stepped aside"),
+  check("nativedark: status reports stepped aside for this host",
+    txt("#status").startsWith("Stepped aside"),
     txt("#status"));
-  check("nativedark: the banner still says the site is themed", !!$("#forcedNote"));
+  await waitFor(() => !$("#forcedNote"));
+  check("nativedark: parent domain force does not keep this host themed", !$("#forcedNote"));
 
   // --- the banner follows a policy change, without reopening the popup -------
   // content.js re-measures when enabled / disabledSites change, so the popup

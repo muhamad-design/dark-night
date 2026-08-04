@@ -114,7 +114,7 @@
   function hostInList(list) {
     return list.some((entry) => {
       const d = entry.replace(/^www\./, "");
-      return HOST === d || HOST.endsWith("." + d);
+      return HOST === d;
     });
   }
 
@@ -131,10 +131,9 @@
   // list, auto-skip - stays shared, because those decide *whether* to theme and
   // already have per-site answers of their own.
   //
-  // Matched on the exact host, unlike the exclusion list, which matches
-  // suffixes: excluding a domain is meant to cover everything under it, whereas
-  // a tuning is a response to one site's design. HOST is the top frame's, so
-  // every frame on a page is painted with the same theme.
+  // Matched on the exact host, same as the exclusion list: mail.google.com and
+  // google.com are different sites. HOST is the top frame's, so every frame on
+  // a page is painted with the same theme.
   function effective(s) {
     const own = s.siteOverrides ? s.siteOverrides[HOST] : null;
     return own && typeof own === "object" ? { ...s, ...own } : s;

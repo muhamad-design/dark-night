@@ -78,7 +78,6 @@ export default function App() {
 
   const entry = blockingEntry(currentSite, settings.disabledSites);
   const host = currentSite ? bare(currentSite) : null;
-  const excludedByParent = !!entry && entry !== host;
   const forcedEntry = blockingEntry(currentSite, settings.forcedSites);
   // Mirrors steppedAside() in content.js, against the popup's live settings, so
   // "Theme it anyway" flips the banner without a round-trip to the page.
@@ -134,29 +133,14 @@ export default function App() {
     if (!forcedEntry) return;
     const next = settings.forcedSites.filter((d) => d !== forcedEntry);
     save({ forcedSites: next });
-    // An exact entry wins over a parent one, so removing it can leave a broader
-    // rule still forcing this host - the page stays themed and the banner stays
-    // up. Report what is true after the removal rather than what was asked for,
-    // exactly as the exclusion list does.
-    const remaining = blockingEntry(currentSite, next);
-    setStatus(
-      remaining
-        ? `Removed ${forcedEntry} - still themed by ${remaining}`
-        : `Stepped aside on ${forcedEntry}`
-    );
+    setStatus(`Stepped aside on ${forcedEntry}`);
   }
 
   function toggleSite() {
     if (!host) return;
     if (entry) {
-      const next = settings.disabledSites.filter((d) => d !== entry);
-      save({ disabledSites: next });
-      // A broader rule can still cover this host, so do not claim it is back on
-      // until the state after the removal actually says so.
-      const remaining = blockingEntry(currentSite, next);
-      setStatus(
-        remaining ? `Removed ${entry} - still excluded by ${remaining}` : `Re-enabled ${entry}`
-      );
+      save({ disabledSites: settings.disabledSites.filter((d) => d !== entry) });
+      setStatus(`Re-enabled ${entry}`);
     } else {
       save({ disabledSites: [...settings.disabledSites, host] });
       setStatus(`Excluded ${host}`);
@@ -220,23 +204,19 @@ export default function App() {
           onClick={toggleSite}
           className="w-full justify-center"
         >
-          {entry ? (excludedByParent ? `Enable ${entry}` : "Enable for this site") : "Disable for this site"}
+          {entry ? "Enable for this site" : "Disable for this site"}
         </Button>
         {/* Exit-only. An entrance animation gates the content on a frame loop:
             under reduced motion or a stalled rAF the note is left invisible. */}
         <AnimatePresence initial={false}>
-          {(excludedByParent || !currentSite) && (
+          {!currentSite && (
             <motion.p
               id="siteNote"
               exit={{ opacity: 0, height: 0 }}
               transition={{ duration: 0.22, ease: EASE_OUT }}
               className="overflow-hidden text-[11px] leading-snug text-muted-foreground"
             >
-              <span className="mt-2 block">
-                {excludedByParent
-                  ? `Excluded by the rule for ${entry}.`
-                  : "Chrome does not allow theming here."}
-              </span>
+              <span className="mt-2 block">Chrome does not allow theming here.</span>
             </motion.p>
           )}
         </AnimatePresence>

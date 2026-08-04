@@ -862,13 +862,15 @@ async function mainSuite() {
   // --- host matching predicate, on the real function ---
   const m = (h, list) => list.some((entry) => {
     const d = entry.replace(/^www\./, "");
-    return h === d || h.endsWith("." + d);
+    return h.replace(/^www\./, "") === d;
   });
   check("match: exact host", m("example.com", ["example.com"]));
-  check("match: subdomain matches parent", m("news.example.com", ["example.com"]));
+  check("match: subdomain is a different site", !m("news.example.com", ["example.com"]));
   check("match: www-prefixed entry normalized", m("example.com", ["www.example.com"]));
   check("match: lookalike suffix rejected", !m("notexample.com", ["example.com"]));
   check("match: parent not disabled by child entry", !m("example.com", ["news.example.com"]));
+  check("match: mail.google.com is not google.com", !m("mail.google.com", ["google.com"]));
+  check("match: google.com is not mail.google.com", !m("google.com", ["mail.google.com"]));
 
   // --- no blue anywhere in the palette ---
   const B0 = window.__mm;
@@ -1334,7 +1336,7 @@ async function mainSuite() {
   check("override: another host's theme is not borrowed",
     B.effective({ ...withOwn, siteOverrides: { "somewhere-else.example": { mode: "filter" } } }).mode
       === "dynamic");
-  // Exact host, unlike the exclusion list, which matches suffixes on purpose.
+  // Exact host for theme overrides and exclusions alike.
   check("override: a parent domain's theme is not inherited",
     B.effective({ ...withOwn, siteOverrides: { "example.com": { mode: "filter" } } }).mode === "dynamic");
   check("override: policy stays shared - an override cannot re-enable a disabled site",

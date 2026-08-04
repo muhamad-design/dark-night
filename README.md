@@ -82,7 +82,7 @@ SIL Open Font License 1.1; the licence travels with the fonts.
 | --- | --- |
 | Toolbar toggle | Master on/off. |
 | `Alt+Shift+D` | Same toggle, from the keyboard. |
-| Disable for this site | Per-site opt-out. Matches subdomains, and ignores a leading `www.` |
+| Disable for this site | Per-site opt-out. Exact hostname (so `mail.google.com` ≠ `google.com`); ignores a leading `www.` |
 | Editing ... | The `Appearance` section's header: which set of settings that section is editing (below). |
 | Dynamic / Filter | The two theming engines (below). |
 | Sliders | Brightness, contrast, sepia, grayscale - applied in both engines. Stepped in 10s, so the slider draws a tick per step (it stops drawing them past 50 steps, which a finer step would exceed). |
@@ -100,9 +100,8 @@ screen, whereas a frozen entrance leaves it invisible.
 The toolbar icon is never decorated - no badge, no overlay. State is answered by the
 popup, which is where it is legible.
 
-When the current site is excluded by a *parent* domain rule, the button says
-`Enable example.com` rather than `Enable for this site` - removing that entry re-enables
-every subdomain under it, so it says so instead of doing it silently.
+Each hostname is its own site: excluding `google.com` does not exclude
+`mail.google.com`. A leading `www.` is still treated as the same host.
 
 Settings live in `chrome.storage.sync`, so they follow the Chrome profile across devices.
 Slider drags are coalesced into one write; every other control writes immediately. If a
@@ -375,7 +374,7 @@ python3 -m http.server 8765
 | `localhost:8765/test/harness.html?suite=hint` | 8 assertions: a remembered verdict seeds the load before the settings arrive, and a stale one is corrected by the measurement rather than believed |
 | `localhost:8765/test/harness.html?suite=invalidated` | 7 assertions: the frame reclaiming itself when the extension is reloaded out from under it. The scheduled rechecks reach `chrome.storage` at 1s and 3s, well inside the 5s liveness poll - and on a page the engine stepped aside from that poll is not running at all |
 | `localhost:8765/test/perf-bench.html` | Style-resolution cost of the real dynamic sheet on a ~9,500-element DOM, and a guard on the specificity booster: it must stay cascade-identical to the chained form and beat it head-to-head |
-| `localhost:8765/test/popup-harness.html` | 116 assertions: the **built** React popup against a mocked `chrome`, including UI component wiring, rejected writes, external changes, corrupt settings, the scope select - that it is not a second tablist, that a closed trigger names the set it edits, and what an edit in each scope does and does not move - the image toggle, and the native-dark banner with its parent-rule disclosure and policy re-query |
+| `localhost:8765/test/popup-harness.html` | 116 assertions: the **built** React popup against a mocked `chrome`, including UI component wiring, rejected writes, external changes, corrupt settings, the scope select - that it is not a second tablist, that a closed trigger names the set it edits, and what an edit in each scope does and does not move - the image toggle, and the native-dark banner with its force/step-aside controls and policy re-query |
 | `localhost:8765/test/worker-harness.html` | 32 assertions: the real `background.js` driven as a black box against a mocked MV3 surface - registration lifecycle, badge clearing, tab adoption, the shortcut, host matching, corrupt storage |
 | `localhost:8765/test/test.html?mode=dynamic\|filter\|off` | Visual page with the layout patterns that commonly break dark-mode extensions |
 

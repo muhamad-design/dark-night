@@ -54,10 +54,12 @@ async function readAndSyncEarlyCss() {
     return;
   }
 
+  // Exact host only (plus www. twin). Subdomains are separate sites — excluding
+  // google.com must not skip early CSS on mail.google.com.
   const excludeMatches = disabledSites
     .map(bare)
     .filter((d) => HOSTNAME.test(d))
-    .flatMap((d) => [`*://${d}/*`, `*://*.${d}/*`]);
+    .flatMap((d) => [`*://${d}/*`, `*://www.${d}/*`]);
 
   const spec = {
     id: EARLY_ID,

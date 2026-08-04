@@ -79,22 +79,18 @@ export const MODE_HINT: Record<Mode, string> = {
 
 export const bare = (host: string) => host.replace(/^www\./, "");
 
-// Must mirror siteDisabled() in content.js, or the popup reports the wrong
-// state on a subdomain of a disabled site.
+// Must mirror hostInList() in content.js. Each hostname is its own site —
+// mail.google.com is not covered by an exclusion for google.com. A leading
+// www. is still normalized away so www.x and x stay one site.
 export function matches(host: string, entry: string) {
-  const d = bare(entry);
-  return host === d || host.endsWith("." + d);
+  return bare(host) === bare(entry);
 }
 
-// The entry responsible for excluding a host. It is not always the host itself:
-// browsing docs.example.com while "example.com" is excluded is a parent match,
-// and removing that entry would re-enable every other subdomain. An exact entry
-// wins over a parent one regardless of list order, so the button always offers
-// the narrowest thing it can remove first.
+// The list entry that excludes this host, if any. Exact hostname only (after
+// stripping a leading www.), so disabling google.com never touches mail.google.com.
 export function blockingEntry(host: string | null, disabledSites: string[]) {
   if (!host) return null;
   const h = bare(host);
-  if (disabledSites.includes(h)) return h;
   return disabledSites.find((d) => matches(h, d)) ?? null;
 }
 
@@ -110,10 +106,8 @@ export function pickTheme(s: Settings): SiteTheme {
 }
 
 // The theme a host is painted with: its own if it has one, otherwise the shared
-// settings. Matched on the exact host, unlike the exclusion list, which matches
-// suffixes. Excluding a domain is meant to cover everything under it; a visual
-// tuning is a response to one site's design, and docs.example.com rarely wants
-// what example.com wanted.
+// settings. Exact host, same as exclusions — a tuning is a response to one
+// site's design, and docs.example.com rarely wants what example.com wanted.
 export function siteTheme(host: string | null, overrides: Record<string, SiteTheme>) {
   return host ? overrides[bare(host)] : undefined;
 }

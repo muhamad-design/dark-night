@@ -195,7 +195,7 @@ async function run() {
   await W.chrome.storage.sync.set({ disabledSites: ["example.com"] });
   await waitFor(() => early() && early().excludeMatches);
   check("per-site: exclusion reaches the pre-paint registration",
-    JSON.stringify(early().excludeMatches) === '["*://example.com/*","*://*.example.com/*"]',
+    JSON.stringify(early().excludeMatches) === '["*://example.com/*","*://www.example.com/*"]',
     JSON.stringify(early().excludeMatches));
   check("badge: excluding a site still paints nothing",
     markedBadges().length === 0, JSON.stringify(markedBadges()));
@@ -297,21 +297,21 @@ async function run() {
   // --- host matching parity with content.js ---------------------------------
   await boot(makeWorld({ tabs: TABS, sync: { disabledSites: ["google.com"] } }));
   await waitFor(() => early() && early().excludeMatches);
-  check("hosts: a parent-domain rule also excludes its subdomains",
-    JSON.stringify(early().excludeMatches) === '["*://google.com/*","*://*.google.com/*"]',
+  check("hosts: excluding google.com does not cover mail.google.com",
+    JSON.stringify(early().excludeMatches) === '["*://google.com/*","*://www.google.com/*"]',
     JSON.stringify(early().excludeMatches));
 
   await boot(makeWorld({ tabs: TABS, sync: { disabledSites: ["www.example.com"] } }));
   await waitFor(() => early() && early().excludeMatches);
   check("hosts: a leading www. is ignored",
-    JSON.stringify(early().excludeMatches) === '["*://example.com/*","*://*.example.com/*"]',
+    JSON.stringify(early().excludeMatches) === '["*://example.com/*","*://www.example.com/*"]',
     JSON.stringify(early().excludeMatches));
 
   // --- entries that cannot become match patterns ----------------------------
   await boot(makeWorld({ tabs: TABS, sync: { disabledSites: ["example.com", "not a host!", "::1"] } }));
   await waitFor(() => early());
   check("patterns: unusable entries are dropped rather than breaking registration",
-    early() && JSON.stringify(early().excludeMatches) === '["*://example.com/*","*://*.example.com/*"]',
+    early() && JSON.stringify(early().excludeMatches) === '["*://example.com/*","*://www.example.com/*"]',
     JSON.stringify(early() && early().excludeMatches));
   check("patterns: the registration still succeeded", !!early());
 
