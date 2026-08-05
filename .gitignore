@@ -4,6 +4,8 @@ node_modules/
 popup/dist/
 .vite/
 *.tsbuildinfo
+# Hand-packed store uploads - built from the tree, never the source of truth.
+*.zip
 .DS_Store
 
 # Session handoff / assistant notes and tooling config - not for the public repo.

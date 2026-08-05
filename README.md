@@ -141,9 +141,9 @@ closed trigger cannot say on its own, and the only reason a hint line is still t
 </p>
 
 The match is the exact host - `docs.example.com` does not inherit what `example.com` was
-tuned to. That is the opposite of the exclusion list, deliberately: excluding a domain is
-meant to cover everything under it, whereas a tuning is a response to one site's design.
-Only the visual settings are per-site. The master switch, the exclusion list and auto-skip
+tuned to. That is the same rule the exclusion list follows, for the same reason: a hostname
+is a site, and a tuning is a response to one site's design. Only the visual settings are
+per-site. The master switch, the exclusion list and auto-skip
 stay shared, because they decide *whether* to theme and already have per-site answers.
 
 **A document with no host of its own still belongs to a page.** The content script also runs
@@ -209,8 +209,12 @@ Turning the setting on hands media straight to the root filter instead, which in
 means it inverts along with the page. That is the point of it - a screenshot or a diagram
 with a white background becomes readable - and an inverted photograph is why it is off until
 asked for. Fullscreen media is handled the other way round in both cases: it sits in the top
-layer, outside the `<html>` subtree, so the root filter never reaches it, and it needs
-nothing while true to colour and the whole treatment applied directly when themed.
+layer, outside the `<html>` subtree, so the filter on `<html>` never reaches it, and it needs
+nothing while true to colour and the whole treatment applied directly when themed. That holds
+only in the frame that owns that filter, though - taking a `<video>` inside an iframe
+fullscreen makes the *iframe* the top document's fullscreen element, and the top frame's
+top-layer pass paints it with the same forward chain - so a subframe emits no fullscreen rule
+at all and its media keeps the reversal it already carries.
 
 `<canvas>` and `<iframe>` are excluded from all of this for the reasons already in
 `content.js`: a canvas is as often an application surface as a picture, and re-filtering an
@@ -262,11 +266,15 @@ correct outcome. A content script cannot spoof the media query to find out what 
 form controls, selection, placeholders and scrollbars. Images and video are untouched.
 Hover and selected states get their own surfaces, so the UI still responds visually.
 
-Every selector carries a `:not(#\9)` specificity booster. `#\9` is an id made of a tab
-character and HTML forbids whitespace in an id, so it matches nothing and only raises
-specificity to `(3,0,0)`. Without it a bare `*` loses to any site rule like
-`.card { background: #fff !important }` and that surface stays white - which was the most
-common reason a themed page still looked untouched.
+Every selector carries a `:not(#\9#\8#\7)` specificity booster. Those are ids made of
+control characters and HTML forbids whitespace in an id, so the compound matches nothing;
+`:not()` takes the specificity of its most specific argument, so a three-id compound raises
+each selector to `(3,0,0)` while matching exactly what it would have matched anyway. Without
+it a bare `*` loses to any site rule like `.card { background: #fff !important }` and that
+surface stays white - which was the most common reason a themed page still looked untouched.
+One `:not()` holding three ids rather than three chained `:not(#\9)`: both are `(3,0,0)`, but
+the collapsed form roughly halves the sheet's style cost - `test/perf-bench.html` measures it
+and pins the exact form.
 
 The sheet is also adopted into every open shadow root, because a `<style>` in `<head>`
 does not cross a shadow boundary and `background-color` does not inherit. Without that,
@@ -291,9 +299,17 @@ Two things are deliberately *not* re-inverted:
   otherwise dark page.
 
 Filter mode also pins `color-scheme: light`, so a site that would otherwise serve its own
-dark theme serves the light one this engine is built to invert, and gives top-layer elements
-(modal dialogs, open popovers, fullscreen) their own filter pass - they are painted outside
-the `<html>` subtree, so the root filter never reached them and they stayed white.
+dark theme serves the light one this engine is built to invert.
+
+Both engines give top-layer elements (modal dialogs, open popovers, fullscreen) their own
+filter pass: they are painted outside the `<html>` subtree, so a filter on `<html>` never
+reaches them. In filter mode that is what stopped modals rendering white. In dynamic mode it
+is the sliders, and it matters for a second reason - the media reversal is a plain type
+selector and does reach the top layer, so without a forward pass to cancel, every image
+inside a `<dialog>` carried the reverse of a filter that had never been applied to it. Media
+that is itself the top-layer element is excluded from the pass and carries nothing, which is
+the one case where nothing forward reaches it. In a subframe neither pass is emitted: the top
+frame's filter already rasterises everything this frame paints, the top layer included.
 
 ## Frames
 
@@ -365,16 +381,16 @@ python3 -m http.server 8765
 
 | URL | Covers |
 | --- | --- |
-| `localhost:8765/test/harness.html` | 169 assertions: both engines, specificity, shadow DOM (including a real custom-element upgrade), frames, top layer, sliders, toggles, per-site rules and per-site themes, which rules a subframe emits and which it leaves to the top frame, what a frame reports to the frames inside it, the sanitising of that report, liveness-poll gating, self-heal, host matching - including which page a hostless `about:blank` document belongs to - and the media reversal, checked as arithmetic: the filter functions are re-implemented as affine maps and the composed chain must land on the identity, against this frame's own filter and against an ancestor's, then re-checked against the brightness and contrast clamping a browser applies - and, because that model cannot see the invert pair, measured through two real rasterisations, where a neutral survives and a saturated colour is pinned as knowingly lost |
+| `localhost:8765/test/harness.html` | 178 assertions: both engines, specificity, shadow DOM (including a real custom-element upgrade), frames, top layer, sliders, toggles, per-site rules and per-site themes, which rules a subframe emits and which it leaves to the top frame, what a frame reports to the frames inside it, the sanitising of that report, liveness-poll gating, self-heal, host matching - including which page a hostless `about:blank` document belongs to - and the media reversal, checked as arithmetic: the filter functions are re-implemented as affine maps and the composed chain must land on the identity, against this frame's own filter and against an ancestor's, then re-checked against the brightness and contrast clamping a browser applies - and, because that model cannot see the invert pair, measured through two real rasterisations, where a neutral survives and a saturated colour is pinned as knowingly lost. The top-layer rules are checked by resolving the cascade rather than by matching the rule text - a class stands in for `:fullscreen`, which cannot be entered without a gesture, and carries the identical specificity - because the reset for fullscreen media was outranked by the reversal it has to beat and every text assertion passed anyway |
 | `localhost:8765/test/harness.html?suite=frames` | 17 assertions: a **real** subframe running the real `content.js` under a top frame running it too. The top frame's engine and sliders reach it over `postMessage`, it re-renders its sheet on receipt, and its media carries the reverse of what the top frame applied - including when the two frames' own settings disagree, which is what an opaque-origin top document produces |
 | `localhost:8765/test/harness.html?suite=orphan` | 9 assertions: the same subframe with **no** extension in the top document, which is what Chrome does with a `file://` or other-extension page around an `http(s)` frame. Nothing answers, so the frame themes itself and compensates for nothing - no lone re-invert, no `color-scheme: light` |
 | `localhost:8765/test/harness.html?suite=pending` | 6 assertions: a settings write landing between the initial storage read and its callback |
-| `localhost:8765/test/harness.html?suite=nativedark` | 43 assertions: the colour classifier across every notation and its alpha handling, stepping aside on an already-dark page, the scheduled recheck catching a page that flips, `forcedSites`, the auto-skip toggle, and what gets remembered |
+| `localhost:8765/test/harness.html?suite=nativedark` | 49 assertions: the colour classifier across every notation and its alpha handling, stepping aside on an already-dark page, the scheduled recheck catching a page that flips, `forcedSites`, the auto-skip toggle, and what gets remembered. Includes the two spellings of one saturated colour having to agree: perceptual lightness is not luminance, so a fixed cut on an `oklch` first component called Tailwind's indigo-700 a light page |
 | `localhost:8765/test/harness.html?suite=earlycss` | 8 assertions: detection against the **real** `early.css` on a light page with a transparent `<body>` - the pre-paint sheet must be released before the first measurement, or the engine reads its own dark colour and switches off on a white page |
 | `localhost:8765/test/harness.html?suite=hint` | 8 assertions: a remembered verdict seeds the load before the settings arrive, and a stale one is corrected by the measurement rather than believed |
 | `localhost:8765/test/harness.html?suite=invalidated` | 7 assertions: the frame reclaiming itself when the extension is reloaded out from under it. The scheduled rechecks reach `chrome.storage` at 1s and 3s, well inside the 5s liveness poll - and on a page the engine stepped aside from that poll is not running at all |
 | `localhost:8765/test/perf-bench.html` | Style-resolution cost of the real dynamic sheet on a ~9,500-element DOM, and a guard on the specificity booster: it must stay cascade-identical to the chained form and beat it head-to-head |
-| `localhost:8765/test/popup-harness.html` | 116 assertions: the **built** React popup against a mocked `chrome`, including UI component wiring, rejected writes, external changes, corrupt settings, the scope select - that it is not a second tablist, that a closed trigger names the set it edits, and what an edit in each scope does and does not move - the image toggle, and the native-dark banner with its force/step-aside controls and policy re-query |
+| `localhost:8765/test/popup-harness.html` | 124 assertions: the **built** React popup against a mocked `chrome`, including UI component wiring, rejected writes, external changes, corrupt settings, the scope select - that it is not a second tablist, that a closed trigger names the set it edits, and what an edit in each scope does and does not move - the image toggle, the native-dark banner with its force/step-aside controls and policy re-query, that a control reporting the value it already has does not snapshot a site override, and that focus after removing an excluded site lands on the row that survives rather than the one animating out |
 | `localhost:8765/test/worker-harness.html` | 32 assertions: the real `background.js` driven as a black box against a mocked MV3 surface - registration lifecycle, badge clearing, tab adoption, the shortcut, host matching, corrupt storage |
 | `localhost:8765/test/test.html?mode=dynamic\|filter\|off` | Visual page with the layout patterns that commonly break dark-mode extensions |
 
@@ -388,6 +404,30 @@ confirm that.
 
 ## Known limitations
 
+- **Dynamic mode paints a transparent overlay container opaque.** The blanket
+  `* { background-color }` rule is what stops a light card or header surviving the color
+  override, and CSS cannot ask whether the author left an element transparent on purpose. A
+  site whose toast, tooltip or portal layer is a full-viewport `position: fixed` wrapper -
+  react-hot-toast's `<Toaster>` is exactly this shape, and so is a hand-rolled
+  `fixed inset-0 pointer-events-none` div - therefore gets a dark rectangle stacked over the
+  page, and the content behind it disappears. Clicks still pass through, so the page is live
+  but invisible. Use filter mode on such a site, or exclude it; telling the two kinds of
+  transparent element apart needs per-element computed-style analysis, which is a different
+  engine, not a rule.
+- **Detection reads `background-color`, so a page whose ground is a gradient reads as
+  light.** A dark-only page that paints `<body>` with a gradient and no background color -
+  `bg-linear-to-b from-slate-950`, say - and does not declare `color-scheme: dark` is not
+  measured as already dark. In dynamic mode that is harmless: it gets the extension's own
+  dark palette. In filter mode it is inverted to near-white, and the fix is per-site: switch
+  that site to dynamic, or exclude it. Reading the gradient instead was tried and rejected -
+  a light page with a dark hero gradient would then silently get no dark mode at all, which
+  is the worse failure.
+- **A fenced frame cannot be compensated.** A `<fencedframe>` (Protected Audience ads) is the
+  root of its own frame tree and has no channel to the page that embeds it, so it cannot be
+  told what the top frame is painting it with. In filter mode it is inverted once by the
+  embedder and emits nothing of its own, so its photos come back as negatives. Assuming the
+  top frame's settings instead would be wrong whenever that frame is in dynamic mode,
+  excluded, or stepped aside - and wrong in the same visible way.
 - **Dynamic mode drops CSS background images on elements** (gradients, hero images, sprite
   icons set via `background-image`). Without this, a light gradient survives the color
   override and leaves near-white text on a near-white band. Sprite icons on `::before` /

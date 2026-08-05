@@ -385,6 +385,26 @@ async function nativeDarkSuite() {
   check("classify: lab dark", dark("lab(20 0 0)") === true);
   check("classify: lab light", dark("lab(90 0 0)") === false);
   check("classify: unparsed keyword is unknown", dark("ButtonFace") === null);
+  // regression: the modern notations carry PERCEPTUAL lightness, which says
+  // nothing about luminance once chroma is involved, so a fixed cut on the first
+  // component was wrong in a way no threshold fixes. Tailwind's indigo-700
+  // computes to this and scored 0.457 against a 0.45 cut - light, on a page whose
+  // relative luminance is 0.069. Every notation goes through one luminance rule
+  // now, so the two spellings of the same colour have to agree.
+  check("classify: a saturated oklch is judged by luminance, not lightness",
+    dark("oklch(0.457 0.24 277.02)") === true, String(dark("oklch(0.457 0.24 277.02)")));
+  check("classify: the same colour in sRGB agrees",
+    dark("rgb(67, 45, 215)") === dark("oklch(0.457 0.24 277.02)"),
+    dark("rgb(67, 45, 215)") + " vs " + dark("oklch(0.457 0.24 277.02)"));
+  check("classify: a saturated LIGHT oklch is still light",
+    dark("oklch(0.85 0.18 90)") === false, String(dark("oklch(0.85 0.18 90)")));
+  // Spaces the regex branch does not name, and hex, now that the browser's own
+  // colour engine answers for anything the fast path does not.
+  check("classify: color(srgb-linear) dark", dark("color(srgb-linear 0.02 0.02 0.03)") === true,
+    String(dark("color(srgb-linear 0.02 0.02 0.03)")));
+  check("classify: color(xyz) dark", dark("color(xyz 0.01 0.01 0.01)") === true,
+    String(dark("color(xyz 0.01 0.01 0.01)")));
+  check("classify: hex is classified", dark("#101112") === true && dark("#fefefe") === false);
 
   // Alpha in the modern syntaxes. Chrome keeps these notations in the computed
   // value, alpha and all, and a Tailwind 4 `bg-black/10` on <body> computes to
@@ -628,7 +648,10 @@ async function mainSuite() {
   document.body.appendChild(lateHost);
   const lateRoot = lateHost.attachShadow({ mode: "open" });
   lateRoot.innerHTML = '<div id="late">late</div>';
-  await tick(200);
+  // Polled, not slept, for the same reason the two upgrades below are: the scan
+  // is debounced 100ms and an unfocused tab clamps that timer to a second or
+  // more, which a fixed 200ms sleep beats to the finish and calls a failure.
+  await waitUntil(() => getComputedStyle(lateRoot.getElementById("late")).backgroundColor === DARK);
   check("shadow: root attached after load is themed",
     getComputedStyle(lateRoot.getElementById("late")).backgroundColor === DARK,
     getComputedStyle(lateRoot.getElementById("late")).backgroundColor);
@@ -736,6 +759,13 @@ async function mainSuite() {
   check("filter: top layer gets its own filter pass", /:modal[^{]*\{[^}]*filter:/.test(css()));
   check("filter: fullscreen media excluded from the top-layer pass",
     /:fullscreen:not\(img\):not\(video\):not\(canvas\)/.test(css()));
+  // regression: the exclusion list must name every element the media reset
+  // governs, or the two rules answer differently for the same element - and
+  // this pass is the more specific of the two, so it won. embed and object were
+  // missing, and a fullscreen <embed src="photo.jpg"> came out a colour negative.
+  check("filter: the top-layer pass excludes every element the media reset lists",
+    /:fullscreen:not\(img\):not\(video\):not\(canvas\):not\(embed\):not\(object\)/.test(css()),
+    norm((css().match(/:fullscreen[^{]*\{/) || [""])[0]));
   // A selector list is dropped WHOLE when the parser rejects any one selector in
   // it, so pairing :modal with the newer :popover-open would silently take
   // modals down on an older Chrome. Each must stand alone.
@@ -770,6 +800,17 @@ async function mainSuite() {
     norm(subFilter({})));
   check("filter: subframe still re-inverts its own media",
     /img, video, embed, object/.test(subFilter({})));
+  // regression: "the root filter never reaches the top layer" is true only in the
+  // frame that owns the root filter. Taking an element inside a subframe
+  // fullscreen makes the <iframe> the top document's fullscreen element, and the
+  // top frame's own top-layer pass paints it with the identical forward chain -
+  // so fullscreen media in here carries exactly what windowed media carries, and
+  // the reset that says "nothing" rendered a fullscreened <video> as a negative.
+  check("filter: a subframe emits no fullscreen media reset",
+    !/:fullscreen/.test(subFilter({})), norm(subFilter({})));
+  check("filter: the top frame still emits one",
+    /video:fullscreen[^{]*\{[^}]*filter: none/.test(
+      window.__mm.buildFilterCss({ ...window.__mm.DEFAULTS }, true, null)));
   // The ROOT filter is what must not be applied twice. A subframe's media rule
   // does still carry slider values, and has to: the top frame's filter
   // rasterises the subframe's painted output too, so media in there is adjusted
@@ -919,9 +960,39 @@ async function mainSuite() {
   check("media: no rule at all when there is nothing to undo",
     !/img[^{]*\{[^}]*filter:/.test(B.buildDynamicCss({ ...B.DEFAULTS })),
     norm(mediaRule(B.buildDynamicCss({ ...B.DEFAULTS }))));
+
+  // --- and the reset for fullscreen media actually WINS -----------------------
+  // Text alone cannot tell: the reversal above carries the specificity booster
+  // and the reset did not, so at (3,0,1) against (0,1,1) the reset lost every
+  // cascade it was ever in and fullscreen media kept a reversal for a filter
+  // that no longer reached it. Resolved for real here rather than matched: a
+  // class stands in for :fullscreen, which cannot be entered without a gesture,
+  // and a class and a pseudo-class have identical specificity, so the winner is
+  // the same one.
+  const cascadeWinner = (css, tag) => {
+    const probe = document.createElement("style");
+    probe.textContent = css.replace(/:fullscreen/g, ".dn-fs-probe");
+    document.head.appendChild(probe);
+    const el = document.createElement(tag);
+    el.className = "dn-fs-probe";
+    document.body.appendChild(el);
+    const got = getComputedStyle(el).filter;
+    el.remove();
+    probe.remove();
+    return got;
+  };
+  check("media: the fullscreen reset outranks the reversal, not just follows it",
+    cascadeWinner(dynTuned, "video") === "none", cascadeWinner(dynTuned, "video"));
+  // The other half of the same cascade: a fullscreen element that is NOT media
+  // takes the forward filter, so media inside it stays paired with something.
+  check("media: a fullscreen non-media element takes the forward filter",
+    /^contrast\(0\.8\) brightness\(1\.3\)/.test(cascadeWinner(dynTuned, "div")),
+    cascadeWinner(dynTuned, "div"));
+  // Located by shape rather than by substring: the top-layer pass names img in a
+  // :not(), which is the opposite of applying a filter to one.
   check("media: opting in hands media straight to the root filter",
-    !/img[^{]*\{[^}]*filter:/.test(
-      B.buildDynamicCss({ ...B.DEFAULTS, brightness: 130, themeImages: true })));
+    !mediaRule(B.buildDynamicCss({ ...B.DEFAULTS, brightness: 130, themeImages: true })),
+    norm(mediaRule(B.buildDynamicCss({ ...B.DEFAULTS, brightness: 130, themeImages: true }))));
 
   // --- the slider filter reaches a subframe from the top frame ---------------
   // A filter on <html> rasterises the whole subtree, and an iframe's painted
@@ -947,12 +1018,23 @@ async function mainSuite() {
   check("frames: a subframe still reverses the sliders on its own media",
     norm(mediaRule(dynSub)) === norm(mediaRule(dynTuned)) && /filter:/.test(mediaRule(dynSub)),
     norm(mediaRule(dynSub)));
+  // The top-layer pass is gated with it, and for the same reason: a modal in a
+  // subframe is painted into that frame, which the top frame's filter already
+  // rasterises, so a second copy would apply the sliders twice there too.
+  const topLayerPass = (css) =>
+    css.split("\n").filter((l) => /^(:modal|\[popover\]|:fullscreen)[^,{\n]*\{ filter:/.test(l));
+  check("frames: the top frame carries the top-layer slider pass",
+    topLayerPass(dynTuned).length === 3, topLayerPass(dynTuned).join(" | ") || "none");
+  check("frames: the top-layer pass applies once, in the top frame only",
+    topLayerPass(dynSub).length === 0, topLayerPass(dynSub).join(" | "));
   // And nothing else moved: dynamic mode paints per frame, so a subframe needs
-  // every other rule in full. The sheets must differ by exactly that one rule.
+  // every other rule in full. The sheets must differ by exactly the rules that
+  // carry the forward filter.
   const linesOf = (c) => c.split("\n").map(norm).filter(Boolean);
   const dropped = linesOf(dynTuned).filter((l) => !linesOf(dynSub).includes(l));
-  check("frames: the root filter is the only rule a subframe drops",
-    norm(dynSub) === norm(dynTuned.replace(rootFilter(dynTuned), "")),
+  check("frames: the forward filter rules are the only ones a subframe drops",
+    dropped.length === 4 &&
+      dropped.every((l) => /^(html|:modal|\[popover\]|:fullscreen)[^,{]*\{ filter:/.test(l)),
     "dropped: " + (dropped.join(" | ") || "nothing"));
 
   // --- the reversal is paired with a real ancestor filter, or it is absent ---
@@ -1320,9 +1402,11 @@ async function mainSuite() {
   // again, and this is the check that stops the one above reading otherwise.
   const tunedThemed = B.buildDynamicCss(
     { ...B.DEFAULTS, brightness: 130, contrast: 80, themeImages: true });
+  // Located with mediaRule() rather than by substring: the top-layer pass names
+  // img inside a :not(), which is the opposite of filtering one.
   check("media: with a slider moved the setting decides whether media is reversed",
     tunedThemed !== dynTuned && /filter:/.test(mediaRule(dynTuned)) &&
-    !/img[^{]*\{[^}]*filter:/.test(tunedThemed), norm(mediaRule(dynTuned)));
+    !mediaRule(tunedThemed), norm(mediaRule(tunedThemed)) || norm(mediaRule(dynTuned)));
 
   // --- a site's own theme ----------------------------------------------------
   const withOwn = { ...B.DEFAULTS, mode: "dynamic", brightness: 100,

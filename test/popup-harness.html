@@ -384,6 +384,34 @@ async function run() {
   // looks live but does nothing is worse than one that says it cannot.
   check("scope: nothing to clear before anything is saved", $("#reset").disabled === true);
 
+  // regression: the segmented control and the slider both report unconditionally,
+  // so a click on the engine already selected - or a press on the thumb that does
+  // not move it - reached setTheme with a patch that changed nothing. In site
+  // scope the first edit is what snapshots the shared values, so a stray click
+  // gave the site a permanent copy of settings it was only inheriting, and it
+  // silently stopped following the shared ones from then on.
+  tab("Dynamic").click();
+  await tick(120);
+  check("scope: clicking the engine already selected is not an edit",
+    !store.siteOverrides || !store.siteOverrides["mail.google.com"],
+    JSON.stringify(store.siteOverrides));
+  const brNoop = slider("brightness");
+  brNoop.focus();
+  key(brNoop, "Home"); // 100 of 50..150, so this one really does move it
+  await waitFor(() => !!(store.siteOverrides && store.siteOverrides["mail.google.com"]));
+  check("scope: a key that does move the slider still snapshots",
+    store.siteOverrides["mail.google.com"].brightness === 50,
+    JSON.stringify(store.siteOverrides));
+  // Now it IS at the minimum, so this one reports the value it already has.
+  const beforeNoop = JSON.stringify(store.siteOverrides);
+  key(brNoop, "Home");
+  await tick(300); // past the slider's 200ms write coalescing
+  check("scope: and one that does not move it changes nothing",
+    JSON.stringify(store.siteOverrides) === beforeNoop, JSON.stringify(store.siteOverrides));
+  $("#reset").click();
+  await waitFor(() => !store.siteOverrides["mail.google.com"]);
+  await pickScope("mail.google.com");
+
   tab("Filter").click();
   await waitFor(() => !!(store.siteOverrides && store.siteOverrides["mail.google.com"]));
   const own = store.siteOverrides["mail.google.com"];
@@ -508,6 +536,21 @@ async function run() {
   await tick(120);
   check("list: focus survives the removal for keyboard users",
     win.document.activeElement && win.document.activeElement.hasAttribute("data-remove"),
+    win.document.activeElement && win.document.activeElement.tagName);
+  // regression: which row is not incidental. The removed row stays mounted for
+  // its exit animation, so the rows in the DOM are still the OLD rows, and taking
+  // the one at that index landed focus on the row that was disappearing - and
+  // then on <body> when it went, stranding a keyboard user mid-list. Named by
+  // identity now, from the list as it stands.
+  check("list: and lands on the row that survives, not the one leaving",
+    win.document.activeElement.getAttribute("data-remove") === "c.com",
+    win.document.activeElement.getAttribute("data-remove"));
+  // The exiting row is still in the DOM at this point, which is what made the
+  // positional version look right in a test and wrong in the popup.
+  await tick(600);
+  check("list: focus is still on a live row once the exit animation is over",
+    win.document.activeElement &&
+    win.document.activeElement.getAttribute("data-remove") === "c.com",
     win.document.activeElement && win.document.activeElement.tagName);
 
   // --- corrupt / out-of-range settings from an older or newer version -------

@@ -59,7 +59,9 @@ export default function App() {
     useSettings();
   const listRef = useRef<HTMLUListElement>(null);
   const summaryRef = useRef<HTMLElement>(null);
-  const focusAfterRemove = useRef<number | null>(null);
+  // The excluded site that should hold focus after a removal: a hostname, null
+  // for "the list is empty now", undefined for "nothing to restore".
+  const focusAfterRemove = useRef<string | null | undefined>(undefined);
   const [slowLoad, setSlowLoad] = useState(false);
   // Which set of visual settings the controls below are editing. Null means
   // "not chosen yet", so the popup opens on whichever set actually paints this
@@ -100,6 +102,14 @@ export default function App() {
   // settings for the keys it happens not to hold, which is not what "only for
   // this site" means.
   function setTheme(patch: Partial<SiteTheme>, opts?: { defer?: boolean }) {
+    // A control reporting the value it already has is not an edit. Both the
+    // segmented control and the slider report unconditionally - a click on the
+    // engine that is already selected, or a press on the slider thumb that does
+    // not move it - and in site scope the first edit is what snapshots the
+    // shared values into a set of the site's own. So a stray click gave the site
+    // a permanent copy of settings it was only inheriting, and it silently
+    // stopped following later changes to the shared ones.
+    if (Object.entries(patch).every(([k, v]) => view[k as keyof SiteTheme] === v)) return;
     if (scope === "site" && host) {
       const base = override ?? pickTheme(settings);
       save({ siteOverrides: { ...settings.siteOverrides, [host]: { ...base, ...patch } } }, opts);
@@ -150,18 +160,28 @@ export default function App() {
   function removeSite(site: string, index: number) {
     save({ disabledSites: settings.disabledSites.filter((d) => d !== site) });
     setStatus(`Re-enabled ${site}`);
-    focusAfterRemove.current = index;
+    // Which row focus should land on, named now, from the list as it still
+    // stands. It cannot be worked out from the DOM afterwards: the removed row
+    // stays mounted for its exit animation, so the rows are still the old rows
+    // and anything positional picked the one that was about to disappear -
+    // focus went with it, to <body>, which strands a keyboard user mid-list.
+    focusAfterRemove.current =
+      settings.disabledSites[index + 1] ?? settings.disabledSites[index - 1] ?? null;
   }
 
   // Restoring focus has to happen after the list has re-rendered, and it has to
   // be an effect rather than a rAF callback: rAF is paused in a background tab,
   // which would silently strand keyboard users.
   useEffect(() => {
-    const index = focusAfterRemove.current;
-    if (index === null) return;
-    focusAfterRemove.current = null;
-    const rows = listRef.current?.querySelectorAll<HTMLButtonElement>("[data-remove]");
-    if (rows?.length) rows[Math.min(index, rows.length - 1)]?.focus();
+    const next = focusAfterRemove.current;
+    if (next === undefined) return;
+    focusAfterRemove.current = undefined;
+    // null is the last excluded site having gone: there is no row left to hold
+    // focus, so it goes back to the disclosure that opens the list.
+    const row = next
+      ? listRef.current?.querySelector<HTMLButtonElement>(`[data-remove="${CSS.escape(next)}"]`)
+      : null;
+    if (row) row.focus();
     else summaryRef.current?.focus();
   }, [settings.disabledSites]);
 

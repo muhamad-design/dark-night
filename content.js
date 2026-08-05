@@ -40,6 +40,20 @@
   let observer = null;
   let watchingHead = false;
 
+  // Every listener this instance puts on `window` or `document` hangs off one
+  // signal, so teardown really does stop it. Observers and timers were already
+  // being stopped there; listeners were not, and a torn-down instance is still
+  // resident in this isolated world with a full set of stale settings. Its
+  // verdict listener re-entered applyTheme and rewrote the live owner's sheet
+  // from those settings, its liveness poll then removed that sheet by id, and a
+  // dead top frame went on answering a fresh subframe's query with a verdict
+  // from before the reload. Nothing painted wrong - the live owner's head
+  // observer repairs the removal inside the same microtask checkpoint - but two
+  // instances were fighting over one frame's style element.
+  const scope = new AbortController();
+  const listen = (target, type, fn, opts) =>
+    target.addEventListener(type, fn, { ...opts, signal: scope.signal });
+
   // Only the top frame paints the page-wide filter in filter mode; a subframe
   // is already inside the top frame's filtered output. Cannot change without a
   // navigation, so resolve it once.
@@ -303,14 +317,20 @@ html {
    parser does not recognise any one of its selectors, so pairing :modal with
    the newer :popover-open would silently take modals down on an older Chrome.
    Fullscreen media is excluded - it has its own re-invert below, and matching
-   it here would invert the video instead. */
+   it here would invert the video instead. The exclusion list must name every
+   element type the media reset below governs, or the two rules answer
+   differently for the same element: embed and object were missing, and since
+   this pass is the more specific of the two it won, so a fullscreen
+   <embed src="photo.jpg"> came out a colour negative. Excluding them also
+   returns a fullscreen PDF to light, which is the same trade the windowed path
+   already makes and documents. */
 :modal {
   filter: ${invert} !important;
 }
 [popover]:popover-open {
   filter: ${invert} !important;
 }
-:fullscreen:not(img):not(video):not(canvas) {
+:fullscreen:not(img):not(video):not(canvas):not(embed):not(object) {
   filter: ${invert} !important;
 }`
       : "";
@@ -335,7 +355,23 @@ img, video, embed, object {
     // nothing at all there - carrying the reverse alone would render it as a
     // colour negative - and themed media needs the whole treatment applied
     // directly, since nothing above it will.
-    const fullscreenMedia = applied.themeImages ? cssFilterValue(applied, true) : "none";
+    //
+    // That premise holds only in the frame that owns the root filter. Taking
+    // an element inside a subframe fullscreen makes the <iframe> the top
+    // document's fullscreen element, and the top frame's own top-layer pass
+    // above paints it with the identical forward chain - so fullscreen media
+    // in a subframe carries exactly what windowed media there carries, and the
+    // plain rule above is already right. Emitting `none` on top of it was the
+    // colour negative: Chrome's own <video controls> fullscreen button makes
+    // the video the fullscreen element, and it came out inverted.
+    const fullscreenRule = isTop
+      ? `
+/* Its own rule, so an older parser rejecting :fullscreen cannot take the media
+   rule above down with it. */
+img:fullscreen, video:fullscreen, canvas:fullscreen, embed:fullscreen, object:fullscreen {
+  filter: ${applied.themeImages ? cssFilterValue(applied, true) : "none"} !important;
+}`
+      : "";
     // Emitted in every frame that an inversion actually reaches, not just the
     // top one: a self-theming cross-origin embed would otherwise serve its own
     // dark theme and get inverted white.
@@ -345,12 +381,7 @@ img, video, embed, object {
      theme, which this engine then inverts into a blinding white page. Pinning
      light gives the filter the light source it is built to invert. */
   color-scheme: light !important;
-}${root}${media}
-/* Its own rule, so an older parser rejecting :fullscreen cannot take the media
-   rule above down with it. */
-img:fullscreen, video:fullscreen, canvas:fullscreen, embed:fullscreen, object:fullscreen {
-  filter: ${fullscreenMedia} !important;
-}
+}${root}${media}${fullscreenRule}
 `;
   }
 
@@ -395,6 +426,30 @@ img:fullscreen, video:fullscreen, canvas:fullscreen, embed:fullscreen, object:fu
     // output is part of that subtree, so a subframe emitting its own copy had
     // the sliders applied twice - brightness 130 landed on 169.
     const filterRule = extra && isTop ? `html${SP} { filter: ${extra} !important; }` : "";
+    // The top layer is painted outside the <html> subtree, so the rule above
+    // never reaches a modal dialog, an open popover or a fullscreen element:
+    // the page followed the sliders and those did not. Worse than the mismatch,
+    // the media reversal below is a plain type selector and does reach them, so
+    // every image inside a <dialog> lightbox carried the reverse of a filter
+    // that had not been applied to it - brightness 130 rendered them at 76.9%.
+    //
+    // Painting the top layer with the same forward chain fixes both: the ground
+    // matches, and the reversal on media inside it is paired again. Filter mode
+    // has always done this; only this engine was missing it.
+    //
+    // One rule each and media excluded, for the same two reasons filter mode
+    // gives: a selector list is dropped in full when the parser rejects any one
+    // of its selectors, and media that is itself the fullscreen element has the
+    // reset below instead. The exclusion list is this engine's media list, not
+    // filter mode's - canvas is deliberately not in it here, so it takes the
+    // sliders like any other surface.
+    const topLayerRule =
+      extra && isTop
+        ? `
+:modal${SP} { filter: ${extra} !important; }
+[popover]${SP}:popover-open { filter: ${extra} !important; }
+:fullscreen${SP}:not(img):not(video):not(embed):not(object) { filter: ${extra} !important; }`
+        : "";
     // This engine never inverts, so the only thing that reaches media is the
     // slider filter on <html> - which is exactly what washed a photograph out
     // at brightness 130 / contrast 80. Media carries the reverse unless the
@@ -415,10 +470,15 @@ img:fullscreen, video:fullscreen, canvas:fullscreen, embed:fullscreen, object:fu
 img${SP}, video${SP}, embed${SP}, object${SP} {
   filter: ${undo} !important;
 }
-/* Fullscreen media is in the top layer, outside the <html> subtree, so the
-   slider filter never reaches it - and reversing a filter that was never
-   applied is what would break it. */
-img:fullscreen, video:fullscreen, embed:fullscreen, object:fullscreen {
+/* Media that is itself the fullscreen element is excluded from the top-layer
+   pass above, so nothing forward reaches it and it must not carry a reversal.
+   The booster is on these selectors too, and it is what makes the rule work at
+   all: the reversal above is (3,0,1), so a bare img:fullscreen at (0,1,1) lost
+   the cascade and this reset never once applied. With it the selector is
+   (3,1,1) and wins on specificity rather than on source order. Dropping the
+   booster from the reversal instead would let a site's own !important filter on
+   media outrank it. */
+img${SP}:fullscreen, video${SP}:fullscreen, embed${SP}:fullscreen, object${SP}:fullscreen {
   filter: none !important;
 }`
       : "";
@@ -534,7 +594,7 @@ hr${SP}, table${SP}, thead${SP}, tbody${SP}, tfoot${SP}, tr${SP}, th${SP}, td${S
 html {
   scrollbar-color: ${T.scrollThumb} ${T.card};
 }
-${filterRule}${mediaRule}
+${filterRule}${topLayerRule}${mediaRule}
 `;
   }
 
@@ -648,7 +708,7 @@ ${filterRule}${mediaRule}
       // run before DOMContentLoaded, so that event is the one point guaranteed
       // to be after the upgrades a bundle performs.
       if (document.readyState === "loading") {
-        document.addEventListener("DOMContentLoaded", sweep, { once: true });
+        listen(document, "DOMContentLoaded", sweep, { once: true });
       }
     }
   }
@@ -783,6 +843,14 @@ ${filterRule}${mediaRule}
     const key = JSON.stringify(msg);
     if (key === lastBroadcast) return;
     lastBroadcast = key;
+    // A frame the page has removed can never need another verdict, and the list
+    // is only ever appended to: an ad slot that refreshes every thirty seconds,
+    // or a player an SPA remounts per item, otherwise leaves a window here for
+    // every frame the tab has ever held. `closed` is true once the browsing
+    // context is discarded, and it is readable cross-origin.
+    for (let i = childFrames.length - 1; i >= 0; i--) {
+      if (childFrames[i].closed) childFrames.splice(i, 1);
+    }
     for (const w of childFrames) {
       try {
         w.postMessage(msg, "*");
@@ -826,15 +894,53 @@ ${filterRule}${mediaRule}
     m = /^color\(\s*(?:srgb|display-p3|a98-rgb|prophoto-rgb|rec2020)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/.exec(color);
     if (m) return rgbIsDark(Number(m[1]), Number(m[2]), Number(m[3]));
 
-    // Chrome preserves the other modern notations as written (Tailwind 4 emits
-    // oklch); in all of them the first component is lightness.
-    m = /^(oklch|oklab|lab|lch)\(\s*([\d.]+)(%?)/.exec(color);
-    if (m) {
-      let l = Number(m[2]);
-      if (m[3] === "%" || m[1] === "lab" || m[1] === "lch") l /= 100;
-      return l < 0.45;
+    // Everything else Chrome can preserve as written - oklch and oklab, which
+    // is what Tailwind 4 emits, lab, lch, and color() in a space the branch
+    // above does not name - is converted to sRGB and answered by the same
+    // luminance rule as every other notation.
+    //
+    // Reading the first component as though it settled the question was wrong in
+    // a way no threshold fixes. Those components are perceptual lightness, which
+    // says nothing about luminance once chroma is involved: Tailwind's
+    // indigo-700 computes to oklch(0.457 0.24 277) and scored 0.457 against a
+    // 0.45 cut, so a page with a relative luminance of 0.069 - unambiguously
+    // dark - read as light. Auto-skip then flattened the site's own dark theme
+    // in dynamic mode, and filter mode inverted it to white.
+    return probeIsDark(color);
+  }
+
+  // The sRGB bytes of an arbitrary CSS colour, from the browser's own colour
+  // engine. Converting oklab and CIE Lab by hand is two more matrices and a
+  // gamma step per space, and the one place a content script can ask for the
+  // answer instead is a 1x1 canvas. Reused, and only ever reached by the
+  // measurement, which runs three times a page load.
+  //
+  // The isolated world has its own copy of the canvas prototypes, so a page
+  // that patches getImageData cannot reach this.
+  let probe = null;
+
+  function probeIsDark(color) {
+    // Only a colour function or a hex literal gets here. A bare keyword stays
+    // "cannot tell" - no computed background-color is ever a keyword, and the
+    // light-failing default is the right answer for anything unrecognised.
+    if (!/[(#]/.test(color)) return null;
+    // Asked before it is drawn, because fillStyle silently keeps its previous
+    // value when handed something it cannot parse - and that stale colour would
+    // then be read back as this one's answer.
+    if (!CSS.supports("color", color)) return null;
+    try {
+      if (!probe) {
+        probe = new OffscreenCanvas(1, 1).getContext("2d", { willReadFrequently: true });
+      }
+      probe.fillStyle = color;
+      probe.clearRect(0, 0, 1, 1);
+      probe.fillRect(0, 0, 1, 1);
+      const [r, g, b, a] = probe.getImageData(0, 0, 1, 1).data;
+      if (a < 128) return null; // see-through, exactly as in the branches above
+      return rgbIsDark(r / 255, g / 255, b / 255);
+    } catch (e) {
+      return null; // no canvas here - fail toward light, like any other unknown
     }
-    return null;
   }
 
   function readPageDark() {
@@ -928,20 +1034,25 @@ ${filterRule}${mediaRule}
     detectionArmed = true;
     const kickoff = () => {
       checkNativeDark();
+      // Not armed once the bridge has gone: checkNativeDark above reclaims the
+      // frame in that case, and two more rechecks would each tear it down
+      // again - and teardown removes the sheet by id, which by then belongs to
+      // the instance that replaced this one.
+      if (!alive()) return;
       for (const delay of DETECT_RECHECKS) detectTimers.push(setTimeout(checkNativeDark, delay));
     };
     // Not before DOMContentLoaded: at document_start the body has no styles
     // yet, and a site's own dark theme often arrives with its stylesheet or a
     // hydration script, both of which have run by then.
     if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", kickoff, { once: true });
+      listen(document, "DOMContentLoaded", kickoff, { once: true });
     } else {
       kickoff();
     }
   }
 
   if (IS_TOP) {
-    window.addEventListener("message", (e) => {
+    listen(window, "message", (e) => {
       if (e.data !== MSG_QUERY || !e.source || e.source === window) return;
       if (!childFrames.includes(e.source)) childFrames.push(e.source);
       // Answered directly rather than through broadcast(): this frame has heard
@@ -956,7 +1067,7 @@ ${filterRule}${mediaRule}
       }
     });
   } else {
-    window.addEventListener("message", (e) => {
+    listen(window, "message", (e) => {
       if (e.source !== window.top) return;
       const d = e.data;
       if (!d || d.type !== MSG_VERDICT || typeof d.dark !== "boolean") return;
@@ -1038,6 +1149,9 @@ ${filterRule}${mediaRule}
   // clear it, so the frame cleans up after itself. Invalidation is permanent,
   // so there is no false positive to worry about.
   function teardown() {
+    // First, so nothing below can be undone by a listener of this instance
+    // firing afterwards.
+    scope.abort();
     stopDeadCheck();
     // A recheck firing after the bridge died would re-measure and could
     // re-apply the theme this teardown just removed.
@@ -1176,6 +1290,20 @@ ${filterRule}${mediaRule}
     });
   }
   chrome.storage.sync.get(DEFAULTS, (stored) => {
+    // Nothing readable means nothing to theme with, and every other storage
+    // callback in this extension already checks. Left unchecked this was the one
+    // path that could strand a page: begin() is the only thing that ever
+    // releases the pre-paint sheet, so without settings the document sat at
+    // early.css's #181a1b, unthemed, for as long as it stayed open.
+    //
+    // Not defaulted, deliberately. DEFAULTS says "on, nothing excluded", and the
+    // exclusion list is precisely what could not be read - theming a site the
+    // user had switched off is a worse answer than not theming at all. So the
+    // sheet is released and the frame stays out of the way.
+    if (chrome.runtime.lastError || !stored) {
+      document.documentElement.setAttribute(READY_ATTR, "");
+      return;
+    }
     firstSettings = stored;
     beginWhenReady();
   });
